@@ -1,0 +1,11 @@
+python experiments/libero/run_libero_eval.py \
+    --task_suite_name libero_10 \
+    --model_family WLA \
+    --model_id SJTU-DENG-Lab/wla_libero_all_image_acton \
+    --run_id_note None \
+    --use_wandb False \
+    --checkpoints_dir "" \
+    --local_log_dir experiments/libero_eval_logs \
+    --norm_file_path configs/norm_stats.json \
+    --unnorm_key libero_all \
+    --save_video True

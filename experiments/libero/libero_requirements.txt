@@ -1,0 +1,10 @@
+imageio[ffmpeg]
+robosuite==1.4.0
+mujoco==3.3.3
+bddl==1.0.1
+easydict==1.9
+cloudpickle==2.1.0
+gym==0.25.2
+numpy==1.26.4
+termcolor==3.3.0
+future==1.0.0
