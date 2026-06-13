@@ -178,21 +178,30 @@ You can modify the `task_suite_name` in the script to evaluate different task su
 
 ### RoboTwin 2.0
 
-First, create the conda environment:
+First, create and activate the conda environment:
 
 ```
-conda env create -f configs/environment_robotwin.yml
+conda create -n wla_robotwin python=3.10 -y
 conda activate wla_robotwin
 ```
 
-Next, clone the [RoboTwin 2.0 repository](https://github.com/robotwin-Platform/robotwin):
+Next, clone the [RoboTwin 2.0 repository](https://github.com/robotwin-Platform/robotwin), install its dependencies, and download the required assets:
 
 ```
-git clone git@github.com:RoboTwin-Platform/RoboTwin.git
+git clone https://github.com/RoboTwin-Platform/RoboTwin.git
 cd RoboTwin
+bash script/_install.sh
+bash script/_download_assets.sh
 ```
 
-Then, follow the [official installation guide](https://robotwin-platform.github.io/doc/usage/robotwin-install.html) to install RoboTwin. Once the installation is complete, you can run the evaluation on the RoboTwin 2.0 benchmark:
+If the installation fails, please follow the [official installation guide](https://robotwin-platform.github.io/doc/usage/robotwin-install.html#5-manual-installation-only-when-step-3-failed) to install RoboTwin manually. Then, return to the project root directory and install the remaining required packages:
+
+```
+cd ..
+pip install -r experiments/robotwin/robotwin_requirements.txt
+```
+
+Finally, run the following script to evaluate the model on the RoboTwin 2.0 benchmark:
 
 ```
 bash experiments/robotwin/run_robotwin_eval.sh
