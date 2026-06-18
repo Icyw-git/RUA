@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-TASK_NAME="click_bell"
-TASK_CONFIG="demo_clean"
+TASK_NAME="blocks_ranking_rgb"
+TASK_CONFIG="demo_randomized"
 CKPT_SETTING="WLA"
 SEED="0"
 GPU_ID="0"
 
-MODEL_ID="wla_robotwin_all_image_action"
+MODEL_ID="SJTU-DENG-Lab/wla_robotwin_all_image_action"
 CHECKPOINTS_DIR=""
 CONTROL_MODE="eef"
 UNNORM_KEY="robotwin_all_eef"

@@ -1,11 +1,8 @@
-import re
-import gc
 import math
 import torch
 
 from torch import nn
 from typing import List
-from qwen_vl_utils import process_vision_info
 
 from diffusers.models.normalization import RMSNorm
 from diffusers import SanaTransformer2DModel
@@ -52,6 +49,7 @@ class MLLMInContextConfig(PretrainedConfig):
         self.chunk_size = kwargs.get("chunk_size")
         self.use_history_obs = kwargs.get("use_history_obs")
         self.training_mode = kwargs.get("training_mode")
+        self.use_begin_frame_context = kwargs.get("use_begin_frame_context", False)
 
 
         self.num_inference_timesteps = kwargs.get("num_inference_timesteps")
@@ -102,6 +100,7 @@ class MLLMInContext(PreTrainedModel):
         self.tokenizer.max_input_text_tokens = config.max_input_text_tokens
         self.tokenizer.num_metaqueries = config.num_metaqueries
         self.tokenizer.system_prompt = config.system_prompt
+        self.tokenizer.use_begin_frame_context = config.use_begin_frame_context
         self.pad_token_id = getattr(
             self.tokenizer, "tokenizer", self.tokenizer
         ).pad_token_id
@@ -209,10 +208,26 @@ class MLLMInContext(PreTrainedModel):
     @staticmethod
     @torch.no_grad()
     def tokenize(
-        tokenizer, caption, image=None, text_response=None, add_generation_prompt=True, language_data=None, training_mode="image"
+        tokenizer,
+        caption,
+        image=None,
+        text_response=None,
+        add_generation_prompt=True,
+        training_mode="image",
+        history_subtask_text=None,
+        target_subtask_text=None,
+        append_metaquery=True,
+        return_subtask_labels=False,
     ):
         if not isinstance(caption, List):
             caption = [caption]
+
+        def as_list(value, default=""):
+            if value is None:
+                return [default for _ in caption]
+            if isinstance(value, List):
+                return value
+            return [value for _ in caption]
 
         prefix = (
             [
@@ -227,15 +242,13 @@ class MLLMInContext(PreTrainedModel):
             else []
         )
 
-        if not add_generation_prompt or tokenizer.num_metaqueries <= 0:
-            suffix = ""
-        elif "action" in training_mode:
-            suffix = (
-                "\n<begin_of_img>"
-                + "".join([f"<img{i}>" for i in range(tokenizer.num_metaqueries)])
-                + "<end_of_img><|im_end|>"
-            )
-        elif "image" in training_mode:
+        suffix = ""
+        if (
+            append_metaquery
+            and add_generation_prompt
+            and tokenizer.num_metaqueries > 0
+            and ("action" in training_mode or "image" in training_mode)
+        ):
             suffix = (
                 "\n<begin_of_img>"
                 + "".join([f"<img{i}>" for i in range(tokenizer.num_metaqueries)])
@@ -250,11 +263,22 @@ class MLLMInContext(PreTrainedModel):
             )
             for cap in caption
         ]
+
+        use_subtask_prompt = (
+            history_subtask_text is not None
+            or target_subtask_text is not None
+            or return_subtask_labels
+        )
+        if use_subtask_prompt and target_subtask_text is None and text_response is not None:
+            target_subtask_text = text_response
+        history_subtask_text = as_list(history_subtask_text)
+        target_subtask_text = as_list(target_subtask_text)
+
         if image is not None:
             if not isinstance(image, list):
                 image = [image]
             for i, img in enumerate(image):
-                if img and not isinstance(img, list):
+                if img is not None and not isinstance(img, list):
                     image[i] = [img]
             if tokenizer.resize_fn is not None:
                 image = [
@@ -262,43 +286,68 @@ class MLLMInContext(PreTrainedModel):
                     for imgs in image
                 ]
 
-            conversations = [
-                prefix
-                + [
-                    {
-                        "role": "user",
-                        "content": (
-                            [{"type": "image"} for _ in imgs]
-                            + [{"type": "text", "text": cap}]
-                            if imgs
-                            else [{"type": "text", "text": cap}]
-                        ),
-                    },
-                ]
-                for cap, imgs in zip(caption, image)
-            ]
             kwargs = {"images": [imgs for imgs in image if imgs]}
         else:
-            conversations = [
+            image = [None for _ in caption]
+            kwargs = dict()
+
+        conversations = []
+        for cap, imgs, history_subtask in zip(caption, image, history_subtask_text):
+            if use_subtask_prompt:
+                content = [{"type": "text", "text": f"Instruction: {cap}"}]
+                if getattr(tokenizer, "use_begin_frame_context", False):
+                    image_start = 0
+                    if imgs:
+                        content.append({"type": "image"})
+                        image_start = 1
+                    if imgs and history_subtask:
+                        content.append({"type": "text", "text": f"Previous subtask: {history_subtask}"})
+                        content.append({"type": "image"})
+                        image_start = 2
+                    if imgs:
+                        content += [{"type": "image"} for _ in imgs[image_start:]]
+                else:
+                    image_start = 0
+                    if imgs and history_subtask:
+                        content.append({"type": "image"})
+                        content.append({"type": "text", "text": f"Previous subtask: {history_subtask}"})
+                        image_start = 1
+                    if imgs:
+                        content += [{"type": "image"} for _ in imgs[image_start:]]
+                content.append({"type": "text", "text": "Current subtask:"})
+            else:
+                content = (
+                    [{"type": "image"} for _ in imgs] + [{"type": "text", "text": cap}]
+                    if imgs
+                    else [{"type": "text", "text": cap}]
+                )
+
+            conversations.append(
                 prefix
                 + [
                     {
                         "role": "user",
-                        "content": [{"type": "text", "text": cap}],
+                        "content": content,
                     },
                 ]
-                for cap in caption
-            ]
-            kwargs = dict()
+            )
 
-        prompts = [
+        base_prompts = [
             tokenizer.apply_chat_template(conv, add_generation_prompt=True)
             for conv in conversations
         ]
-        if text_response is not None:
-            prompts = [p + t.strip() for p, t in zip(prompts, text_response)]
+        if use_subtask_prompt:
+            response_prompts = [
+                prompt + str(response).strip()
+                for prompt, response in zip(base_prompts, target_subtask_text)
+            ]
+            prompts = [p + suffix for p in response_prompts]
+        else:
+            prompts = base_prompts
+            if text_response is not None:
+                prompts = [p + t.strip() for p, t in zip(prompts, text_response)]
+            prompts = [p + suffix for p in prompts]
 
-        prompts = [p + suffix for p in prompts]
 
         text_inputs = tokenizer(
             text=prompts,
@@ -312,110 +361,57 @@ class MLLMInContext(PreTrainedModel):
         if "pixel_values" in text_inputs:
             text_inputs["pixel_values"] = text_inputs["pixel_values"].unsqueeze(0)
 
-
-        if language_data is not None:
-            conversations = []
-
-            for item in language_data:
-                images = item.get("images")                
-                messages = []
-                
-                for turn in item["messages"]:
-                    role = turn.get("role")
-                    text = turn.get("content")
-                    
-                    if role == "user":
-                        content = []
-                        
-                        if not text:
-                            content.append({"type": "text", "text": ""})
-                        else:
-                            for seg in re.split(r"(<image>)", text):
-                                if seg == "<image>" and images:
-                                    content.append({"type": "image", "image": images.pop(0)})
-                                elif seg.strip():
-                                    content.append({"type": "text", "text": seg.strip()})
-                        messages.append({"role": role, "content": content})
-                        
-                    else:
-                        if not text:
-                            messages.append({"role": role, "content": [{"type": "text", "text": ""}]})
-                        else:
-                            messages.append({"role": role, "content": [{"type": "text", "text": text}]})
-
-                conversations.append(messages)
-
-            prompts = [
-                tokenizer.apply_chat_template(conv, tokenize=False)
-                for conv in conversations
-            ]
-            
-            image_inputs = [
-                process_vision_info(conv)[0]
-                for conv in conversations
-            ]
-            image_inputs = [img for img in image_inputs if img] or None
-            
-            language_data_inputs = tokenizer(
-                text=prompts,
-                images=image_inputs,
+        subtask_labels = None
+        if return_subtask_labels:
+            base_tokenizer = getattr(tokenizer, "tokenizer", tokenizer)
+            im_end_token_id = base_tokenizer.convert_tokens_to_ids("<|im_end|>")
+            base_inputs = tokenizer(
+                text=base_prompts,
                 return_tensors="pt",
                 padding=True,
-                truncation=True,
-                max_length=2048,
+                do_rescale=False,
+                **kwargs,
+            )
+            response_inputs = tokenizer(
+                text=response_prompts,
+                return_tensors="pt",
+                padding=True,
+                do_rescale=False,
+                **kwargs,
+            )
+            labels = torch.full_like(text_inputs["input_ids"], -100)
+            full_lengths = text_inputs["attention_mask"].sum(dim=1)
+            base_lengths = base_inputs["attention_mask"].sum(dim=1)
+            response_lengths = response_inputs["attention_mask"].sum(dim=1)
+            seq_len = text_inputs["input_ids"].shape[1]
+            for batch_idx in range(text_inputs["input_ids"].shape[0]):
+                offset = seq_len - int(full_lengths[batch_idx].item())
+                start = offset + int(base_lengths[batch_idx].item())
+                end = offset + int(response_lengths[batch_idx].item())
+                if end > start:
+                    labels[batch_idx, start:end] = text_inputs["input_ids"][batch_idx, start:end]
+                    if end < seq_len:
+                        labels[batch_idx, end] = im_end_token_id
+            subtask_labels = labels
+
+
+        if "pixel_values" in text_inputs:
+            output = (
+                text_inputs["input_ids"],
+                text_inputs["attention_mask"],
+                text_inputs["pixel_values"],
+                text_inputs.get("image_grid_thw", text_inputs.get("image_sizes")),
+            )
+        else:
+            output = (
+                text_inputs["input_ids"],
+                text_inputs["attention_mask"],
             )
 
-            start_token = 77091
-            end_token = 151645
-            prefix_token = 151644
-            suffix_token = 198
-            IGNORE_INDEX = -100
+        if return_subtask_labels:
+            output = output + (subtask_labels,)
 
-            input_ids = language_data_inputs["input_ids"]
-            labels = torch.full_like(input_ids, IGNORE_INDEX)
-
-            batch_size, seq_len = input_ids.shape
-            for batch_idx in range(batch_size):
-                input_ids_1d = input_ids[batch_idx]
-
-                start_positions = (input_ids_1d == start_token).nonzero(as_tuple=True)[0]
-
-                if len(start_positions) == 0:
-                    continue
-                
-                end_positions = (input_ids_1d == end_token).nonzero(as_tuple=True)[0]
-
-                for start_pos in start_positions:
-
-                    if start_pos < 1 or input_ids_1d[start_pos - 1] != prefix_token:
-                        continue
-                    if start_pos + 1 >= seq_len or input_ids_1d[start_pos + 1] != suffix_token:
-                        continue
-
-                    ans_start = start_pos + 2
-                    
-                    if ans_start >= seq_len:
-                        continue
-
-                    valid_ends = end_positions[end_positions >= ans_start]
-                    
-                    if len(valid_ends) > 0:
-                        ans_end = valid_ends[0].item()
-                        copy_end = min(ans_end + 2, seq_len)
-                        labels[batch_idx, ans_start:copy_end] = input_ids[batch_idx, ans_start:copy_end]
-
-            language_data_inputs["labels"] = labels
-                
-            text_inputs["language_data"] = language_data_inputs
-            
-            del conversations
-            torch.cuda.empty_cache()
-            gc.collect()
-        
-        else:
-            text_inputs["language_data"] = None
-
-        return text_inputs.values()
+        return output
 
 
     def encode_condition_action(
@@ -444,33 +440,47 @@ class MLLMInContext(PreTrainedModel):
 
 
     def encode_condition(
-        self, input_ids, attention_mask, mllm_output, action_cond_features, **kwargs
+        self, input_ids, attention_mask, mllm_output, action_cond_features, current_image_index=None, **kwargs
     ):
         prompt_embeds = mllm_output.hidden_states
         embeddings = mllm_output.hidden_states[0]
 
         repeats = 1 if action_cond_features is None else action_cond_features.shape[0] // input_ids.shape[0]
+        if current_image_index is None:
+            current_image_index = torch.full(
+                (input_ids.shape[0],),
+                1 if self.config.use_history_obs else 0,
+                dtype=torch.long,
+                device=input_ids.device,
+            )
+        elif not isinstance(current_image_index, torch.Tensor):
+            current_image_index = torch.tensor(current_image_index, dtype=torch.long, device=input_ids.device)
+        else:
+            current_image_index = current_image_index.to(device=input_ids.device, dtype=torch.long)
+
         if repeats > 1:
             input_ids = input_ids.repeat_interleave(repeats, dim=0)
             attention_mask = attention_mask.repeat_interleave(repeats, dim=0)
             embeddings = embeddings.repeat_interleave(repeats, dim=0)
             prompt_embeds =[p.repeat_interleave(repeats, dim=0) for p in prompt_embeds]
+            current_image_index = current_image_index.repeat_interleave(repeats, dim=0)
 
         if self.tokenizer.num_metaqueries > 0:
             # Get positions for all sequences in batch at once
             boi_pos = torch.where(input_ids == self.boi_token_id)[1]
             eoi_pos = torch.where(input_ids == self.eoi_token_id)[1]
             
-            def get_vision_positions(input_ids, token_id, use_history_obs):
+            def get_vision_positions(input_ids, token_id, image_indices):
                 positions = torch.full((input_ids.size(0),), -1, dtype=torch.long, device=input_ids.device)
                 rows, cols = torch.where(input_ids == token_id)
                 for r in rows.unique():
-                    cols_r = cols[rows == r]
-                    positions[r] = cols_r[1] if use_history_obs else cols_r.min()
+                    cols_r = cols[rows == r].sort().values
+                    image_idx = min(int(image_indices[r].item()), cols_r.numel() - 1)
+                    positions[r] = cols_r[image_idx]
                 return positions
 
-            vision_start = get_vision_positions(input_ids, self.vision_start_token_id, use_history_obs=self.config.use_history_obs)
-            vision_end = get_vision_positions(input_ids, self.vision_end_token_id, use_history_obs=self.config.use_history_obs)
+            vision_start = get_vision_positions(input_ids, self.vision_start_token_id, current_image_index)
+            vision_end = get_vision_positions(input_ids, self.vision_end_token_id, current_image_index)
 
 
             # Create mask for selecting tokens between BOI and EOI

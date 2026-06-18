@@ -249,7 +249,6 @@ class WLATrainer(Trainer):
                 compute_image_loss=True,
                 compute_action_loss=False,
                 require_action_loss=False,
-                compute_language_loss=False,
             )
             total_loss = primary_outputs["loss"] + secondary_outputs["loss"]
             outputs = {

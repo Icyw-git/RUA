@@ -4,6 +4,7 @@ __pycache__/
 /log/
 /wandb/
 /LIBERO/
+/RMBench/
 /RoboTwin/
 /datasets/
 /experiments/rollouts/
@@ -27,4 +28,12 @@ __pycache__/
 /checkpoints_robotwin_same_emb_videos_cotrain_image_action/
 /output_robotwin_cross_emb_videos_cotrain_image_action/
 /checkpoints_robotwin_cross_emb_videos_cotrain_image_action/
+/output_rmbench_battery_try_image_action_language/
+/checkpoints_rmbench_battery_try_image_action_language/
+/output_rmbench_blocks_ranking_try_image_action_language/
+/checkpoints_rsmbench_block_ranking_try_image_action_language/
+/output_rmbench_cover_blocks_image_action_language/
+/checkpoints_rmbench_cover_blocks_image_action_language/
+/output_rmbench_press_button_image_action_language/
+/checkpoints_rmbench_press_button_image_action_language/
 /flash_attn-2.8.3+cu128torch2.8-cp311-cp311-linux_x86_64.whl

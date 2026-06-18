@@ -3,8 +3,9 @@ set -euo pipefail
 
 # If command-line task names are provided, they override this list.
 TASK_NAMES=(
-    blocks_ranking_rgb
-    blocks_ranking_size
+    stack_blocks_three
+    stack_bowls_three
+    place_a2b_left
 )
 
 TASK_CONFIGS=(

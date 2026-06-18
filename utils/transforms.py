@@ -33,16 +33,33 @@ def pad_to_dim(x, target_dim, value: float = 0.0):
     return x, mask
 
 
-def normalize_and_pad(data, norm_stats_key, max_dim):
+# def normalize_and_pad(data, norm_stats_key, max_dim):
+#     data_max = torch.tensor(norm_stats_key["max"])
+#     data_min = torch.tensor(norm_stats_key["min"])
+#     normalized_data = 2 * (data - data_min) / (data_max - data_min + 1e-6) - 1
+#     return pad_to_dim(normalized_data, max_dim)
+
+
+# def unnormalize_and_unpad(data, norm_stats_key, original_dim):
+#     data_max = torch.tensor(norm_stats_key["max"]).to(data.device)
+#     data_min = torch.tensor(norm_stats_key["min"]).to(data.device)
+#     unpadded_data = data[..., :original_dim]
+#     denormalized_data = (unpadded_data + 1) * (data_max - data_min + 1e-6) / 2 + data_min
+#     return denormalized_data
+
+
+def normalize_and_pad(data, norm_stats_key, max_dim, add_eps=True):
     data_max = torch.tensor(norm_stats_key["max"])
     data_min = torch.tensor(norm_stats_key["min"])
-    normalized_data = 2 * (data - data_min) / (data_max - data_min + 1e-6) - 1
+    eps = 1e-6 if add_eps else 0.0
+    normalized_data = 2 * (data - data_min) / (data_max - data_min + eps) - 1
     return pad_to_dim(normalized_data, max_dim)
 
 
-def unnormalize_and_unpad(data, norm_stats_key, original_dim):
+def unnormalize_and_unpad(data, norm_stats_key, original_dim, add_eps=True):
     data_max = torch.tensor(norm_stats_key["max"]).to(data.device)
     data_min = torch.tensor(norm_stats_key["min"]).to(data.device)
     unpadded_data = data[..., :original_dim]
-    denormalized_data = (unpadded_data + 1) * (data_max - data_min + 1e-6) / 2 + data_min
+    eps = 1e-6 if add_eps else 0.0
+    denormalized_data = (unpadded_data + 1) * (data_max - data_min + eps) / 2 + data_min
     return denormalized_data

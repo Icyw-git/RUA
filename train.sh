@@ -8,6 +8,10 @@
 # TRAINING_SETTING="robotwin_seen_tasks_image_action"
 # TRAINING_SETTING="robotwin_cross_emb_videos_cotrain_image_action"
 # TRAINING_SETTING="robotwin_same_emb_videos_cotrain_image_action"
+# TRAINING_SETTING="rmbench_battery_try_image_action_language"
+# TRAINING_SETTING="rmbench_blocks_ranking_try_image_action_language"
+# TRAINING_SETTING="rmbench_cover_blocks_image_action_language"
+# TRAINING_SETTING="rmbench_press_button_image_action_language"
 
 TRAINING_SETTING="robotwin_all_image_action"
 

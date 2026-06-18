@@ -4,18 +4,201 @@ import re
 import PIL
 import json
 import h5py
+import glob
 import torch
 import random
 import numpy as np
 
 from tqdm import tqdm
 from functools import partial
+from collections import OrderedDict
 from torch.utils.data import ConcatDataset
 from torchvision.transforms import v2
 from torchcodec.decoders import VideoDecoder
 from utils.data_utils import index_episodes, index_episodes_egodex, get_robocoin_list
 from utils.transforms import _make_transform, resize_with_pad, normalize_and_pad, pad_to_dim
 from lerobot.datasets.lerobot_dataset import LeRobotDataset, LeRobotDatasetMetadata, MultiLeRobotDataset
+
+
+SUBTASK_ENDINGS = (".", "!", "?", "。", "！", "？")
+
+
+def _to_int(value):
+    if isinstance(value, torch.Tensor):
+        return int(value.item())
+    return int(value)
+
+
+def _is_pad(value):
+    if isinstance(value, torch.Tensor):
+        return bool(value.item())
+    return bool(value)
+
+
+def _has_language_mode(args):
+    return "language" in str(getattr(args, "training_mode", ""))
+
+
+def _normalize_subtask_text(text):
+    text = str(text).strip()
+    if not text:
+        return ""
+    return text if text.endswith(SUBTASK_ENDINGS) else f"{text}."
+
+
+def _join_subtask_texts(texts):
+    normalized = []
+    for text in texts:
+        text = _normalize_subtask_text(text)
+        if text and (not normalized or normalized[-1] != text):
+            normalized.append(text)
+    return " ".join(normalized)
+
+
+def _iter_lerobot_datasets(dataset):
+    if isinstance(dataset, torch.utils.data.Subset):
+        return _iter_lerobot_datasets(dataset.dataset)
+    return getattr(dataset, "_datasets", [dataset])
+
+
+class EpisodeBeginFrameCache:
+    def __init__(self, base_dataset, image_key, max_size=None):
+        self.datasets = list(_iter_lerobot_datasets(base_dataset))
+        self.image_key = image_key
+        self.max_size = max_size
+        self.cache = OrderedDict()
+
+    def get(self, dataset_index, episode_index):
+        key = (dataset_index, episode_index)
+        if key in self.cache:
+            self.cache.move_to_end(key)
+            return self.cache[key]
+
+        sub_dataset = self.datasets[dataset_index]
+        episode = sub_dataset.meta.episodes[episode_index]
+        video_path = sub_dataset.root / sub_dataset.meta.get_video_file_path(
+            episode_index,
+            self.image_key,
+        )
+        timestamp = episode[f"videos/{self.image_key}/from_timestamp"]
+        from lerobot.datasets.video_utils import decode_video_frames
+
+        frame = decode_video_frames(
+            video_path,
+            [timestamp],
+            sub_dataset.tolerance_s,
+            sub_dataset.video_backend,
+        ).squeeze(0)
+
+        self.cache[key] = frame
+        if self.max_size is not None and len(self.cache) > self.max_size:
+            self.cache.popitem(last=False)
+        return frame
+
+
+def _build_subtask_segments(dataset):
+    import pandas as pd
+
+    segments_by_dataset = []
+    for sub_dataset in _iter_lerobot_datasets(dataset):
+        parquet_paths = sorted(sub_dataset.root.glob("data/chunk-*/file-*.parquet"))
+        episode_segments = {}
+        for parquet_path in parquet_paths:
+            df = pd.read_parquet(
+                parquet_path,
+                columns=["index", "episode_index", "subtask_text"],
+            ).sort_values(["episode_index", "index"])
+
+            for episode_index, episode_df in df.groupby("episode_index", sort=False):
+                segments = episode_segments.setdefault(
+                    int(episode_index),
+                    {"start": None, "end": None, "segments": []},
+                )
+
+                current_text = None
+                current_start = None
+                previous_index = None
+
+                for abs_index, _, text_value in episode_df[["index", "episode_index", "subtask_text"]].itertuples(index=False, name=None):
+                    abs_index = int(abs_index)
+                    text = str(text_value).strip()
+
+                    if segments["start"] is None:
+                        segments["start"] = abs_index
+                    segments["end"] = abs_index
+
+                    if not text:
+                        if current_text:
+                            segments["segments"].append((current_start, previous_index, current_text))
+                            current_text = None
+                            current_start = None
+                        previous_index = abs_index
+                        continue
+
+                    if text != current_text:
+                        if current_text:
+                            segments["segments"].append((current_start, previous_index, current_text))
+                        current_text = text
+                        current_start = abs_index
+
+                    previous_index = abs_index
+
+                if current_text:
+                    segments["segments"].append((current_start, previous_index, current_text))
+
+        segments_by_dataset.append(episode_segments)
+    return segments_by_dataset
+
+
+def _aggregate_subtasks(subtask_segments, dataset_index, episode_index, start_index, end_index):
+    if not subtask_segments:
+        return ""
+
+    episode_info = subtask_segments[dataset_index].get(episode_index)
+    if not episode_info:
+        return ""
+
+    start_index = max(start_index, episode_info["start"])
+    end_index = min(end_index, episode_info["end"])
+    if end_index < start_index:
+        return ""
+
+    texts = [
+        text
+        for seg_start, seg_end, text in episode_info["segments"]
+        if seg_end >= start_index and seg_start <= end_index
+    ]
+    return _join_subtask_texts(texts)
+
+
+def _episode_start_index(subtask_segments, dataset_index, episode_index):
+    if not subtask_segments or dataset_index >= len(subtask_segments):
+        return None
+    episode_info = subtask_segments[dataset_index].get(episode_index)
+    if not episode_info:
+        return None
+    return episode_info["start"]
+
+
+def _valid_subtask_episodes(repo_id):
+    import pandas as pd
+
+    parquet_paths = sorted(glob.glob(os.path.join(repo_id, "data", "chunk-*", "file-*.parquet")))
+    if not parquet_paths:
+        return None
+
+    valid = set()
+    seen = set()
+    for parquet_path in parquet_paths:
+        df = pd.read_parquet(parquet_path, columns=["episode_index", "subtask_text"])
+        nonempty = df["subtask_text"].fillna("").astype(str).str.strip().ne("")
+        seen.update(int(ep) for ep in df["episode_index"].unique())
+        valid.update(int(ep) for ep in df.loc[nonempty, "episode_index"].unique())
+
+    dropped = len(seen - valid)
+    if dropped:
+        print(f"Filtered {dropped} empty-subtask episodes from {repo_id}")
+    return sorted(valid)
 
 
 class LeRobotTrainDataset(torch.utils.data.Dataset):
@@ -29,10 +212,10 @@ class LeRobotTrainDataset(torch.utils.data.Dataset):
         auxiliary_image_key,
         norm_stats,
         model_args,
-        language_dataset=None,
         instruction_dict=None,
         primary_depth_key=None,
         include_actions=True,
+        normalize_add_eps=True,
     ):
         self.dataset = base_dataset
         self.target_transform = target_transform
@@ -41,11 +224,21 @@ class LeRobotTrainDataset(torch.utils.data.Dataset):
         self.auxiliary_image_key = auxiliary_image_key
         self.norm_stats = norm_stats
         self.model_args = model_args
-        self.language_dataset = language_dataset
         self.instruction_dict = instruction_dict
         self.include_actions = include_actions
+        self.normalize_add_eps = normalize_add_eps
         self.primary_image_transform = _make_transform(primary_image_size)
         self.auxiliary_image_transform = _make_transform(auxiliary_image_size)
+        self.subtask_segments = (
+            _build_subtask_segments(base_dataset)
+            if _has_language_mode(model_args)
+            else None
+        )
+        self.begin_frame_cache = (
+            EpisodeBeginFrameCache(base_dataset, primary_image_key)
+            if getattr(model_args, "use_begin_frame_context", False)
+            else None
+        )
 
     def __len__(self):
         return len(self.dataset)
@@ -62,16 +255,29 @@ class LeRobotTrainDataset(torch.utils.data.Dataset):
         result = {'caption': caption}
         
         images = item[self.primary_image_key]
-        target_images = images[1:-1] if self.model_args.use_history_obs else images[1:]
+        use_begin_frame_context = getattr(self.model_args, "use_begin_frame_context", False)
+        target_images = [images[1]] if use_begin_frame_context else (
+            images[1:-1] if self.model_args.use_history_obs else images[1:]
+        )
         result["target_images"] = [self.target_transform(img) for img in target_images]
         
         if "depth" in self.model_args.training_mode and self.primary_depth_key:
-            target_depths = item[self.primary_depth_key][1:]
+            target_depths = [item[self.primary_depth_key][1]] if use_begin_frame_context else item[self.primary_depth_key][1:]
             result["target_depths"] = [self.target_transform(img) for img in target_depths]
       
         if self.include_actions:
-            result["states"], _ = normalize_and_pad(item['observation.state'], self.norm_stats['observation.state'], self.model_args.max_state_dim)
-            normalized_actions, action_mask = normalize_and_pad(item['action'], self.norm_stats["action"], self.model_args.max_action_dim)
+            result["states"], _ = normalize_and_pad(
+                item['observation.state'],
+                self.norm_stats['observation.state'],
+                self.model_args.max_state_dim,
+                add_eps=self.normalize_add_eps,
+            )
+            normalized_actions, action_mask = normalize_and_pad(
+                item['action'],
+                self.norm_stats["action"],
+                self.model_args.max_action_dim,
+                add_eps=self.normalize_add_eps,
+            )
             padded_actions = pad_to_dim(item['action'], self.model_args.max_action_dim)[0]
             result["actions"], result["action_mask"] = normalized_actions, action_mask
 
@@ -87,13 +293,65 @@ class LeRobotTrainDataset(torch.utils.data.Dataset):
                 limits = torch.arange(1, sample_num + 1, dtype=torch.float32).unsqueeze(1) * chunk_size // sample_num
                 result["action_cond"] = (torch.arange(chunk_size, dtype=torch.float32) < limits).unsqueeze(-1)
 
-        input_imgs = [(item[self.primary_image_key][0], self.primary_image_transform)]
+        history_is_pad = False
         if self.model_args.use_history_obs:
-            input_imgs.insert(0, (item[self.primary_image_key][-1], self.auxiliary_image_transform))
+            pad_key = f"{self.primary_image_key}_is_pad"
+            history_is_pad = pad_key in item and _is_pad(item[pad_key][-1])
+
+        if _has_language_mode(self.model_args):
+            dataset_index = _to_int(item.get("dataset_index", 0))
+            episode_index = _to_int(item["episode_index"])
+            abs_index = _to_int(item["index"])
+            history_subtask = ""
+            if self.model_args.use_history_obs and not history_is_pad:
+                history_start = (
+                    _episode_start_index(self.subtask_segments, dataset_index, episode_index)
+                    if use_begin_frame_context
+                    else abs_index - self.model_args.history_obs_step
+                )
+                history_end = abs_index - 1 if use_begin_frame_context else abs_index
+                if history_start is not None:
+                    history_subtask = _aggregate_subtasks(
+                        self.subtask_segments,
+                        dataset_index,
+                        episode_index,
+                        history_start,
+                        history_end,
+                    )
+            target_subtask = _aggregate_subtasks(
+                self.subtask_segments,
+                dataset_index,
+                episode_index,
+                abs_index,
+                abs_index + self.model_args.chunk_size,
+            )
+            if not target_subtask and "subtask_text" in item:
+                target_subtask = _normalize_subtask_text(item["subtask_text"])
+
+            result["history_subtask_text"] = history_subtask
+            result["target_subtask_text"] = target_subtask
+
+        if use_begin_frame_context:
+            dataset_index = _to_int(item.get("dataset_index", 0))
+            episode_index = _to_int(item["episode_index"])
+            begin_frame = self.begin_frame_cache.get(dataset_index, episode_index)
+            input_imgs = [(begin_frame, self.primary_image_transform)]
+            current_image_index = 1
+            if self.model_args.use_history_obs and not history_is_pad:
+                input_imgs.append((item[self.primary_image_key][-1], self.auxiliary_image_transform))
+                current_image_index = 2
+            input_imgs.append((item[self.primary_image_key][0], self.primary_image_transform))
+        else:
+            input_imgs = [(item[self.primary_image_key][0], self.primary_image_transform)]
+            current_image_index = 0
+            if self.model_args.use_history_obs:
+                input_imgs.insert(0, (item[self.primary_image_key][-1], self.auxiliary_image_transform))
+                current_image_index = 1
 
         if random.random() >= self.model_args.auxiliary_drop_thresh:
             input_imgs +=[(item[key], self.auxiliary_image_transform) for key in self.auxiliary_image_key if key is not None]
 
+        result["current_image_index"] = current_image_index
         null_mask = torch.rand(len(input_imgs)) < 0
         result["input_images"] = [
             transform(torch.zeros_like(img) if mask and img is not None else img) 
@@ -101,10 +359,6 @@ class LeRobotTrainDataset(torch.utils.data.Dataset):
             for (img, transform), mask in zip(input_imgs, null_mask)
         ]
         
-        if self.language_dataset is not None:
-            random_idx = random.randint(0, len(self.language_dataset) - 1)
-            result["language_data"] = self.language_dataset[random_idx]
-
         return result
 
 class LeRobotEvalDataset(torch.utils.data.Dataset):
@@ -120,6 +374,7 @@ class LeRobotEvalDataset(torch.utils.data.Dataset):
         instruction_dict,
         primary_depth_key=None,
         include_actions=True,
+        normalize_add_eps=True,
     ):
         self.dataset = base_dataset
         self.primary_image_key = primary_image_key
@@ -129,8 +384,19 @@ class LeRobotEvalDataset(torch.utils.data.Dataset):
         self.model_args = model_args
         self.instruction_dict = instruction_dict
         self.include_actions = include_actions
+        self.normalize_add_eps = normalize_add_eps
         self.primary_image_transform = _make_transform(primary_image_size)
         self.auxiliary_image_transform = _make_transform(auxiliary_image_size)
+        self.subtask_segments = (
+            _build_subtask_segments(base_dataset)
+            if _has_language_mode(model_args)
+            else None
+        )
+        self.begin_frame_cache = (
+            EpisodeBeginFrameCache(base_dataset, primary_image_key)
+            if getattr(model_args, "use_begin_frame_context", False)
+            else None
+        )
 
     def __len__(self):
         return len(self.dataset)
@@ -144,14 +410,30 @@ class LeRobotEvalDataset(torch.utils.data.Dataset):
         result = {'caption': caption}
 
         images = item[self.primary_image_key]
-        result["target_images"] = images[1:-1] if self.model_args.use_history_obs else images[1:]
+        use_begin_frame_context = getattr(self.model_args, "use_begin_frame_context", False)
+        result["target_images"] = [images[1]] if use_begin_frame_context else (
+            images[1:-1] if self.model_args.use_history_obs else images[1:]
+        )
         
         if "depth" in self.model_args.training_mode and self.primary_depth_key:
-            result["target_depths"] = item[self.primary_depth_key][1:]
+            result["target_depths"] = (
+                [item[self.primary_depth_key][1]]
+                if use_begin_frame_context else item[self.primary_depth_key][1:]
+            )
 
         if self.include_actions:
-            result["states"], _ = normalize_and_pad(item['observation.state'], self.norm_stats['observation.state'], self.model_args.max_state_dim)
-            normalized_actions, action_mask = normalize_and_pad(item['action'], self.norm_stats["action"], self.model_args.max_action_dim)
+            result["states"], _ = normalize_and_pad(
+                item['observation.state'],
+                self.norm_stats['observation.state'],
+                self.model_args.max_state_dim,
+                add_eps=self.normalize_add_eps,
+            )
+            normalized_actions, action_mask = normalize_and_pad(
+                item['action'],
+                self.norm_stats["action"],
+                self.model_args.max_action_dim,
+                add_eps=self.normalize_add_eps,
+            )
             padded_actions = pad_to_dim(item['action'], self.model_args.max_action_dim)[0]
             result["actions"], result["action_mask"] = normalized_actions, action_mask
             
@@ -166,13 +448,65 @@ class LeRobotEvalDataset(torch.utils.data.Dataset):
                 limits = torch.arange(1, sample_num + 1, dtype=torch.float32).unsqueeze(1) * chunk_size // sample_num
                 result["action_cond"] = (torch.arange(chunk_size, dtype=torch.float32) < limits).unsqueeze(-1)
 
-        input_imgs = [(item[self.primary_image_key][0], self.primary_image_transform)]
+        history_is_pad = False
         if self.model_args.use_history_obs:
-            input_imgs.insert(0, (item[self.primary_image_key][-1], self.auxiliary_image_transform))
+            pad_key = f"{self.primary_image_key}_is_pad"
+            history_is_pad = pad_key in item and _is_pad(item[pad_key][-1])
+
+        if _has_language_mode(self.model_args):
+            dataset_index = _to_int(item.get("dataset_index", 0))
+            episode_index = _to_int(item["episode_index"])
+            abs_index = _to_int(item["index"])
+            history_subtask = ""
+            if self.model_args.use_history_obs and not history_is_pad:
+                history_start = (
+                    _episode_start_index(self.subtask_segments, dataset_index, episode_index)
+                    if use_begin_frame_context
+                    else abs_index - self.model_args.history_obs_step
+                )
+                history_end = abs_index - 1 if use_begin_frame_context else abs_index
+                if history_start is not None:
+                    history_subtask = _aggregate_subtasks(
+                        self.subtask_segments,
+                        dataset_index,
+                        episode_index,
+                        history_start,
+                        history_end,
+                    )
+            target_subtask = _aggregate_subtasks(
+                self.subtask_segments,
+                dataset_index,
+                episode_index,
+                abs_index,
+                abs_index + self.model_args.chunk_size,
+            )
+            if not target_subtask and "subtask_text" in item:
+                target_subtask = _normalize_subtask_text(item["subtask_text"])
+
+            result["history_subtask_text"] = history_subtask
+            result["target_subtask_text"] = target_subtask
+
+        if use_begin_frame_context:
+            dataset_index = _to_int(item.get("dataset_index", 0))
+            episode_index = _to_int(item["episode_index"])
+            begin_frame = self.begin_frame_cache.get(dataset_index, episode_index)
+            input_imgs = [(begin_frame, self.primary_image_transform)]
+            current_image_index = 1
+            if self.model_args.use_history_obs and not history_is_pad:
+                input_imgs.append((item[self.primary_image_key][-1], self.auxiliary_image_transform))
+                current_image_index = 2
+            input_imgs.append((item[self.primary_image_key][0], self.primary_image_transform))
+        else:
+            input_imgs = [(item[self.primary_image_key][0], self.primary_image_transform)]
+            current_image_index = 0
+            if self.model_args.use_history_obs:
+                input_imgs.insert(0, (item[self.primary_image_key][-1], self.auxiliary_image_transform))
+                current_image_index = 1
 
         if random.random() > self.model_args.auxiliary_drop_thresh:
             input_imgs +=[(item[key], self.auxiliary_image_transform) for key in self.auxiliary_image_key if key is not None]
 
+        result["current_image_index"] = current_image_index
         result["input_images"] = [
             transform(img) if img is not None else None
             for (img, transform) in input_imgs
@@ -455,21 +789,55 @@ def _collate_fn(batch, tokenize_func, tokenizer, model_args):
         ])
 
     captions = [example["caption"] for example in batch]
-    language_data = [example.get("language_data") for example in batch] if "language" in model_args.training_mode else None
+    return_dict["caption"] = captions
+    if any("current_image_index" in example for example in batch):
+        return_dict["current_image_index"] = torch.tensor(
+            [example.get("current_image_index", 0) for example in batch],
+            dtype=torch.long,
+        )
+    if _has_language_mode(model_args):
+        return_dict["history_subtask_text"] = [example.get("history_subtask_text", "") for example in batch]
+        return_dict["target_subtask_text"] = [example.get("target_subtask_text", "") for example in batch]
 
     if any(imgs is not None for imgs in input_images):
+        tokenized = tokenize_func(
+            tokenizer,
+            captions,
+            input_images,
+            training_mode=model_args.training_mode,
+            history_subtask_text=return_dict.get("history_subtask_text"),
+            target_subtask_text=return_dict.get("target_subtask_text"),
+            return_subtask_labels=_has_language_mode(model_args),
+        )
         (
             return_dict["input_ids"],
             return_dict["attention_mask"],
             return_dict["pixel_values"],
             return_dict["image_sizes"],
-            return_dict["language_data"],
-        ) = tokenize_func(tokenizer, captions, input_images, language_data=language_data, training_mode=model_args.training_mode)
+        ) = tokenized[:4]
+        if len(tokenized) > 4:
+            return_dict["subtask_labels"] = tokenized[4]
     else:
-        return_dict["input_ids"], return_dict["attention_mask"] = tokenize_func(
-            tokenizer, captions, training_mode=model_args.training_mode
+        tokenized = tokenize_func(
+            tokenizer,
+            captions,
+            training_mode=model_args.training_mode,
+            history_subtask_text=return_dict.get("history_subtask_text"),
+            target_subtask_text=return_dict.get("target_subtask_text"),
+            return_subtask_labels=_has_language_mode(model_args),
         )
+        return_dict["input_ids"], return_dict["attention_mask"] = tokenized[:2]
+        if len(tokenized) > 2:
+            return_dict["subtask_labels"] = tokenized[2]
     return return_dict
+
+
+def _current_input_image(sample, model_args):
+    current_image_index = sample.get(
+        "current_image_index",
+        1 if model_args.use_history_obs else 0,
+    )
+    return sample["input_images"][current_image_index]
 
 
 def get_train_datasets(data_args, training_args, model_args, tokenize_func, tokenizer):
@@ -574,7 +942,6 @@ def get_train_datasets(data_args, training_args, model_args, tokenize_func, toke
             auxiliary_image_key=auxiliary_image_key,
             norm_stats=norm_stats,
             model_args=model_args,
-            language_dataset=None,
             instruction_dict=None
         )
         
@@ -617,7 +984,6 @@ def get_train_datasets(data_args, training_args, model_args, tokenize_func, toke
             auxiliary_image_key=auxiliary_image_key,
             norm_stats=norm_stats,
             model_args=model_args,
-            language_dataset=None,
             instruction_dict=None
         )
         
@@ -641,9 +1007,10 @@ def get_train_datasets(data_args, training_args, model_args, tokenize_func, toke
             if "depth" in model_args.training_mode else None
         )
 
-    elif "robotwin" in data_args.train_datasets:
+    elif "robotwin" in data_args.train_datasets or "rmbench" in data_args.train_datasets:
         primary_base_dataset, norm_stats, instruction_dict, primary_image_key, primary_depth_key, auxiliary_image_key = \
-            load_robotwin_dataset(data_args, model_args, training_args, include_actions=True)
+            load_robotwin_or_rmbench_dataset(data_args, model_args, training_args, include_actions=True)
+        normalize_add_eps = "rmbench" not in data_args.train_datasets
 
         random.seed(training_args.data_seed)
         primary_eval_dataset = torch.utils.data.Subset(
@@ -651,8 +1018,6 @@ def get_train_datasets(data_args, training_args, model_args, tokenize_func, toke
             random.sample(range(len(primary_base_dataset)), min(len(primary_base_dataset), training_args.world_size))
         )
         
-        language_dataset = load_language_dataset(data_args, training_args) if "language" in model_args.training_mode else None
-
         primary_train_dataset = LeRobotTrainDataset(
             base_dataset=primary_base_dataset,
             target_transform=target_transform,
@@ -663,9 +1028,9 @@ def get_train_datasets(data_args, training_args, model_args, tokenize_func, toke
             auxiliary_image_key=auxiliary_image_key,
             norm_stats=norm_stats,
             model_args=model_args,
-            language_dataset=language_dataset,
             instruction_dict=instruction_dict,
             include_actions=True,
+            normalize_add_eps=normalize_add_eps,
         )
         primary_eval_dataset = LeRobotEvalDataset(
             base_dataset=primary_eval_dataset,
@@ -678,10 +1043,10 @@ def get_train_datasets(data_args, training_args, model_args, tokenize_func, toke
             model_args=model_args,
             instruction_dict=instruction_dict,
             include_actions=True,
+            normalize_add_eps=normalize_add_eps,
         )
 
-        src_idx = 1 if model_args.use_history_obs else 0
-        collect_src_images = lambda dataset: [ground_truth_transform(sample["input_images"][src_idx]) for sample in dataset]
+        collect_src_images = lambda dataset: [ground_truth_transform(_current_input_image(sample, model_args)) for sample in dataset]
         collect_gt_images = lambda dataset: [ground_truth_transform(sample["target_images"][0]) for sample in dataset]
         collect_gt_depths = lambda dataset: (
             [ground_truth_transform(sample["target_depths"][0]) for sample in dataset]
@@ -722,7 +1087,7 @@ def get_train_datasets(data_args, training_args, model_args, tokenize_func, toke
                 )
             else:
                 secondary_base_dataset, secondary_norm_stats, secondary_instruction_dict, secondary_primary_image_key, secondary_primary_depth_key, secondary_auxiliary_image_key = \
-                    load_robotwin_dataset(
+                    load_robotwin_or_rmbench_dataset(
                         data_args,
                         model_args,
                         training_args,
@@ -746,7 +1111,6 @@ def get_train_datasets(data_args, training_args, model_args, tokenize_func, toke
                     auxiliary_image_key=secondary_auxiliary_image_key,
                     norm_stats=secondary_norm_stats,
                     model_args=model_args,
-                    language_dataset=None,
                     instruction_dict=secondary_instruction_dict,
                     include_actions=False,
                 )
@@ -794,7 +1158,6 @@ def get_train_datasets(data_args, training_args, model_args, tokenize_func, toke
         ]
         robocoin_list = get_robocoin_list(data_args.dataset_root_dir, target_robots)
         
-        language_dataset = load_language_dataset(data_args, training_args) if "language" in model_args.training_mode else None
         train_list, eval_list = [], []
         
         random.seed(training_args.data_seed)        
@@ -820,7 +1183,6 @@ def get_train_datasets(data_args, training_args, model_args, tokenize_func, toke
                     auxiliary_image_key=auxiliary_image_key,
                     norm_stats=norm_stats,
                     model_args=model_args,
-                    language_dataset=language_dataset,
                     instruction_dict=None
                 )
             )
@@ -856,39 +1218,6 @@ def get_train_datasets(data_args, training_args, model_args, tokenize_func, toke
         )
 
     return train_dataset, eval_dataset, gt_images, gt_depths, src_images, collate_fn
-
-
-def load_language_dataset(data_args, training_args):
-    language_dataset_dir = data_args.language_dataset_dir
-    language_dataset = []
-    
-    json_dir = os.path.join(language_dataset_dir, "json_files")
-    images_dir = os.path.join(language_dataset_dir, 'images')
-    
-    for json_file in os.listdir(json_dir):
-        if not json_file.endswith('.json'):
-            continue
-        
-        json_name = os.path.splitext(json_file)[0]
-        json_path = os.path.join(json_dir, json_file)
-        
-        with open(json_path, 'r', encoding='utf-8') as f:
-            json_data = json.load(f)
-
-        for item in json_data:
-            messages = item.get('messages')
-            images = item.get('images')
-
-            images = [os.path.join(images_dir, json_name, img) for img in images] if images else None
-
-            language_dataset.append({
-                'messages': messages,
-                'images': images
-            })
-    random.seed(training_args.data_seed)
-    random.shuffle(language_dataset)
-    return language_dataset
-
 
 def load_libero_dataset(data_args, model_args, training_args):
     ds_meta = LeRobotDatasetMetadata(
@@ -944,6 +1273,11 @@ def _discover_lerobot_repo_ids(root_dir):
         return [root_dir]
 
     repo_ids = []
+    for folder_name in ROBOTWIN_VARIANT_FOLDERS:
+        repo_path = os.path.join(root_dir, folder_name)
+        if _is_lerobot_repo(repo_path):
+            repo_ids.append(repo_path)
+
     for task_name in sorted(os.listdir(root_dir)):
         task_path = os.path.join(root_dir, task_name)
         if not os.path.isdir(task_path):
@@ -956,7 +1290,7 @@ def _discover_lerobot_repo_ids(root_dir):
     return sorted(set(repo_ids))
 
 
-def load_robotwin_dataset(
+def load_robotwin_or_rmbench_dataset(
     data_args,
     model_args,
     training_args,
@@ -969,7 +1303,8 @@ def load_robotwin_dataset(
         variant_folders = ", ".join(ROBOTWIN_VARIANT_FOLDERS)
         raise ValueError(
             f"No LeRobot repositories found under {dataset_root_dir}. "
-            f"Expected directories like <root>/<task>/{{{variant_folders}}}."
+            f"Expected directories like <root>/{{{variant_folders}}} "
+            f"or <root>/<task>/{{{variant_folders}}}."
         )
 
     ds_meta = LeRobotDatasetMetadata(repo_ids[0])
@@ -997,8 +1332,18 @@ def load_robotwin_dataset(
     if include_actions:
         delta_timestamps["action"] = [t / ds_meta.fps for t in range(model_args.chunk_size)]
 
+    episodes = None
+    if _has_language_mode(model_args):
+        episodes = {}
+        for repo_id in repo_ids:
+            valid_episodes = _valid_subtask_episodes(repo_id)
+            if valid_episodes is not None and not valid_episodes:
+                raise ValueError(f"No non-empty subtask episodes found in {repo_id}")
+            episodes[repo_id] = valid_episodes
+
     dataset = MultiLeRobotDataset(
         repo_ids=repo_ids,
+        episodes=episodes,
         delta_timestamps=delta_timestamps,
         video_backend="pyav"
     )

@@ -73,6 +73,7 @@ class ModelArguments:
     sample_num: int = 4
     use_history_obs: bool = True
     history_obs_step: int = 8
+    use_begin_frame_context: bool = False
     auxiliary_drop_thresh: float = 0.1
     max_action_dim: int = 14
     max_state_dim: int = 14
@@ -113,7 +114,6 @@ class DataArguments:
     norm_stats_path: str = "configs/norm_stats.json"
     camera_keys_path: str = "configs/robocoin_camera_keys.json"
     unnorm_key: str = "libero_all"
-    language_dataset_dir = ""
 
 
 @dataclass

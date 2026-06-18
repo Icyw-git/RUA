@@ -1,0 +1,84 @@
+_gradient_checkpointing: True
+vae_id: "SJTU-DENG-Lab/Sana_600M_512px_diffusers_64channels"
+noise_scheduler_id: "SJTU-DENG-Lab/Sana_600M_512px_diffusers_64channels"
+scheduler_id: "SJTU-DENG-Lab/Sana_600M_512px_diffusers_64channels"
+mllm_id: "Alibaba-DAMO-Academy/RynnBrain-2B"
+diffusion_model_id: "SJTU-DENG-Lab/Sana_600M_512px_diffusers_64channels"
+deepspeed: configs/zero1.json
+norm_stats_path: configs/norm_stats.json
+
+modules_to_freeze:
+  - "vae"
+
+modules_to_unfreeze:
+  - "model.mllm_backbone.model.visual"
+  - "model.mllm_backbone.model.language_model"
+  - "model.mllm_backbone.model.language_model.embed_tokens"
+  - "model.world_expert"
+  - "model.connector"
+  - "model.action_expert"
+
+connector_num_hidden_layers: 1
+vae_downsample_f: 32
+in_channels: 64
+num_metaqueries: 64
+target_image_size: 512
+primary_image_size: 256
+auxiliary_image_size: 256
+auxiliary_drop_thresh: 0.0
+
+learning_rate: 0.00005
+lr_scheduler_kwargs:
+  min_lr: 0.000005
+lr_scheduler_type: "cosine_with_min_lr"
+
+per_device_train_batch_size: 56
+warmup_steps: 1000
+# num_train_epochs: 5
+max_steps: 30000
+eval_steps: 2000
+save_steps: 5000
+
+max_action_dim: 14
+max_state_dim: 14
+chunk_size: 32
+use_history_obs: true
+history_obs_step: 32
+use_begin_frame_context: true
+action_condition_type: no_action_condition
+sample_num: 1
+
+# action model
+num_inference_timesteps: 32
+num_target_vision_tokens: 0
+add_pos_embed: True
+max_seq_len: 1024
+noise_beta_alpha: 1.5
+noise_beta_beta: 1.0
+num_timestep_buckets: 1000
+noise_s: 0.999
+repeated_diffusion_steps: 16
+
+diffusion_model_cfg:
+  num_layers: 28
+  cross_attention_dim: 2048
+  input_embedding_dim: 1024
+  attention_head_dim: 32
+  num_attention_heads: 32
+  output_dim: 1024
+  interleave_self_attention: true
+  norm_type: "norm"
+  dropout: 0.0
+  final_dropout: false
+  positional_embeddings: null
+
+train_datasets: rmbench
+eval_dataset: rmbench
+dataset_root_dir: datasets/RMBench-LeRobot/press_button
+instruction_folder_path: configs/rmbench_seen_instruction.json
+training_mode: image_action_language
+unnorm_key: rmbench_press_button
+output_dir: output_rmbench_press_button_image_action_language
+save_dir: checkpoints_rmbench_press_button_image_action_language
+save_part_checkpoints: True
+resume_from_checkpoint: null

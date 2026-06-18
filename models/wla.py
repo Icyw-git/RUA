@@ -135,19 +135,21 @@ class WLA(PreTrainedModel):
     ):
         compute_image_loss = kwargs.get("compute_image_loss", "image" in self.training_mode)
         requested_action_loss = kwargs.get("compute_action_loss", "action" in self.training_mode)
-        compute_language_loss = kwargs.get("compute_language_loss", "language" in self.training_mode)
+        subtask_labels = kwargs.get("subtask_labels", None)
+        mllm_labels = subtask_labels if "language" in self.training_mode else None
 
         mllm_output = self.model.mllm_backbone(
             input_ids=input_ids,
             pixel_values=pixel_values,
             image_grid_thw=kwargs.get("image_sizes", None),
             attention_mask=attention_mask,
+            labels=mllm_labels,
             output_hidden_states=True,
         )
 
         image_loss = None
         action_loss = None
-        language_loss = None
+        language_loss = mllm_output.loss if mllm_labels is not None else None
 
         if "image" in self.training_mode and compute_image_loss:
             
@@ -212,6 +214,7 @@ class WLA(PreTrainedModel):
                 attention_mask=attention_mask,
                 mllm_output=mllm_output,
                 action_cond_features=action_cond_features,
+                current_image_index=kwargs.get("current_image_index", None),
             )
 
             model_pred = self.model(
@@ -262,21 +265,21 @@ class WLA(PreTrainedModel):
                 state_repeated
             )
 
-        if "language" in self.training_mode and compute_language_loss:
-            language_data_inputs = kwargs.get("language_data")
-            language_outputs = self.model.mllm_backbone(**language_data_inputs)            
-            language_loss = language_outputs.loss
-
         if "image_action" in self.training_mode:
             loss_config = {
                 "image_loss": (image_loss, 0.1),
                 "action_loss": (action_loss, 1.0),
-                "language_loss": (language_loss, 0.005)
             }
         elif "image" in self.training_mode:
             loss_config = {
-                "image_loss": (image_loss, 1),
+                "image_loss": (image_loss, 1.0),
             }
+        else:
+            loss_config = {
+                "action_loss": (action_loss, 1.0),
+            }
+        if "language" in self.training_mode:
+            loss_config["language_loss"] = (language_loss, 0.005)
 
         total_loss = None
         loss_dict = {}
@@ -325,6 +328,88 @@ class WLA(PreTrainedModel):
 
         return samples, samples_depth
 
+    def _as_batch_list(self, value, batch_size, default=""):
+        if value is None:
+            return [default for _ in range(batch_size)]
+        if isinstance(value, torch.Tensor):
+            value = value.detach().cpu().tolist()
+        if isinstance(value, list):
+            return value
+        return [value for _ in range(batch_size)]
+
+    def _normalize_input_images(self, input_images):
+        if input_images is None:
+            return None
+        if isinstance(input_images, PIL.Image.Image):
+            return [[input_images]]
+        if isinstance(input_images, list) and (not input_images or not isinstance(input_images[0], list)):
+            return [input_images]
+        assert isinstance(input_images, list) and all(
+            isinstance(sublist, list) for sublist in input_images
+        ), "input_images needs to be a nested list"
+        return input_images
+
+    @torch.no_grad()
+    def generate_subtask(
+        self,
+        caption="",
+        input_images=None,
+        history_subtask_text=None,
+        max_new_tokens=None,
+        **kwargs,
+    ):
+        device = next(self.parameters()).device
+        single_caption = not isinstance(caption, list)
+        if single_caption:
+            caption = [caption]
+
+        input_images = self._normalize_input_images(input_images)
+        batch_size = len(caption)
+        history_subtask_text = self._as_batch_list(history_subtask_text, batch_size)
+
+        tokenize_func = self.get_tokenize_fn()
+        tokenizer = self.get_tokenizer()
+
+        if input_images is not None:
+            input_ids, attention_mask, pixel_values, image_sizes = tokenize_func(
+                tokenizer,
+                caption,
+                input_images,
+                training_mode=self.training_mode,
+                history_subtask_text=history_subtask_text,
+                append_metaquery=False,
+            )
+        else:
+            input_ids, attention_mask = tokenize_func(
+                tokenizer,
+                caption,
+                training_mode=self.training_mode,
+                history_subtask_text=history_subtask_text,
+                append_metaquery=False,
+            )
+            pixel_values = None
+            image_sizes = None
+
+        input_ids = input_ids.to(device=device)
+        attention_mask = attention_mask.to(device=device)
+        pixel_values = pixel_values.to(device=device) if pixel_values is not None else None
+        image_sizes = image_sizes.to(device=device) if image_sizes is not None else None
+
+        generated_ids = self.model.mllm_backbone.generate(
+            input_ids=input_ids,
+            pixel_values=pixel_values,
+            image_grid_thw=image_sizes,
+            attention_mask=attention_mask,
+            max_new_tokens=max_new_tokens or 256,
+            do_sample=False,
+            pad_token_id=self.model.pad_token_id,
+            eos_token_id=self.model.im_end_token_id,
+        )
+        generated_ids = generated_ids[:, input_ids.shape[1]:]
+        decoded = tokenizer.tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
+        decoded = [text.split("<|im_end|>")[0].strip() for text in decoded]
+        return decoded[0] if single_caption else decoded
+
     def sample_images(
         self,
         caption="",
@@ -341,22 +426,22 @@ class WLA(PreTrainedModel):
     ):
         device = next(self.parameters()).device
         action_cond = kwargs.get("action_cond", None)
+        current_image_index = kwargs.get("current_image_index", None)
         if action_cond is not None:
             action_cond = action_cond.unsqueeze(0)
 
         if not isinstance(caption, list):
             caption = [caption]
 
-        if input_images is not None:
-            if isinstance(input_images, list) and not isinstance(input_images[0], list):
-                input_images = [[img] for img in input_images]
-            elif isinstance(input_images, PIL.Image.Image):
-                input_images = [[input_images]]
-            assert isinstance(input_images, list) and all(
-                isinstance(sublist, list) for sublist in input_images
-            ), "input_images needs to be a nested list"
+        input_images = self._normalize_input_images(input_images)
 
         bsz = len(caption)
+        if current_image_index is not None:
+            if not isinstance(current_image_index, torch.Tensor):
+                current_image_index = torch.tensor(current_image_index, dtype=torch.long)
+            else:
+                current_image_index = current_image_index.to(dtype=torch.long)
+            current_image_index = current_image_index.reshape(-1)
         do_image_classifier_free_guidance = image_guidance_scale > 1.0  # True
         do_image_classifier_free_guidance = False
 
@@ -382,6 +467,8 @@ class WLA(PreTrainedModel):
                     for images in input_images
                 ]
                 input_images = input_images_null + input_images * 2
+                if current_image_index is not None:
+                    current_image_index = current_image_index.repeat(3)
             else:
                 if action_cond is not None:
                     action_cond = action_cond.to(device=device).repeat_interleave(
@@ -389,13 +476,17 @@ class WLA(PreTrainedModel):
                     )
                 caption = [negative_prompt] * bsz + caption
                 input_images = input_images * 2
+                if current_image_index is not None:
+                    current_image_index = current_image_index.repeat(2)
 
-            input_ids, attention_mask, pixel_values, image_sizes, _ = tokenize_func(
+            input_ids, attention_mask, pixel_values, image_sizes = tokenize_func(
                 tokenizer, caption, input_images, training_mode="image"
             )
         else:
             do_image_classifier_free_guidance = False
             caption = [negative_prompt] * bsz + caption
+            if current_image_index is not None:
+                current_image_index = current_image_index.repeat(2)
             input_ids, attention_mask = tokenize_func(tokenizer, caption, training_mode="image")
             pixel_values = None
             image_sizes = None
@@ -430,6 +521,10 @@ class WLA(PreTrainedModel):
         attention_mask = attention_mask.to(device=device).repeat_interleave(
             num_images_per_prompt, dim=0
         )
+        if current_image_index is not None:
+            current_image_index = current_image_index.to(device=device).repeat_interleave(
+                num_images_per_prompt, dim=0
+            )
 
         if action_cond is not None:
             action_cond = action_cond.to(device=device).repeat_interleave(
@@ -465,6 +560,8 @@ class WLA(PreTrainedModel):
             action_cond_features = self.model.action_encoder(action_cond) if action_cond is not None else None
         elif "learnable_action_token" in self.config.action_condition_type:
             action_cond_features = action_cond * self.model.learnable_action_token if action_cond is not None else None
+        elif "no_action_condition" in self.config.action_condition_type:
+            action_cond_features = None
         else:
             action_cond_features = None
 
@@ -473,6 +570,7 @@ class WLA(PreTrainedModel):
             attention_mask=attention_mask,
             mllm_output=mllm_output,
             action_cond_features=action_cond_features,
+            current_image_index=current_image_index,
         )
         # Convert to float32 before saving
         for t in tqdm(
@@ -535,26 +633,40 @@ class WLA(PreTrainedModel):
     ):
         # eval_mode = kwargs.get("eval_mode")
         device = next(self.parameters()).device
+        history_subtask_text = kwargs.get("history_subtask_text", None)
+        provided_subtask_text = kwargs.get("subtask_text", None)
 
         if not isinstance(caption, list):
             caption = [caption]
 
-        if input_images is not None:
-            if isinstance(input_images, list) and not isinstance(input_images[0], list):
-                input_images = [[img] for img in input_images]
-            elif isinstance(input_images, PIL.Image.Image):
-                input_images = [[input_images]]
-            assert isinstance(input_images, list) and all(
-                isinstance(sublist, list) for sublist in input_images
-            ), "input_images needs to be a nested list"
-
+        input_images = self._normalize_input_images(input_images)
         bsz = len(caption)
+        history_subtask_text = self._as_batch_list(history_subtask_text, bsz)
+        language_mode = "language" in str(self.config.training_mode)
+
+        if language_mode:
+            if provided_subtask_text is None:
+                subtask_text = self.generate_subtask(
+                    caption=caption,
+                    input_images=input_images,
+                    history_subtask_text=history_subtask_text,
+                )
+            else:
+                subtask_text = provided_subtask_text
+            subtask_text = self._as_batch_list(subtask_text, bsz)
+        else:
+            subtask_text = None
 
         tokenize_func = self.get_tokenize_fn()
         tokenizer = self.get_tokenizer()
 
-        input_ids, attention_mask, pixel_values, image_sizes, _ = tokenize_func(
-            tokenizer, caption, input_images, training_mode="action"
+        input_ids, attention_mask, pixel_values, image_sizes = tokenize_func(
+            tokenizer,
+            caption,
+            input_images,
+            training_mode="action",
+            history_subtask_text=history_subtask_text if language_mode else None,
+            target_subtask_text=subtask_text if language_mode else None,
         )
 
         # Repeat pixel_values and conditions for each image per prompt

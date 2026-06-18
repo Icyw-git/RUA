@@ -1,7 +1,7 @@
 python experiments/libero/run_libero_eval.py \
     --task_suite_name libero_10 \
     --model_family WLA \
-    --model_id SJTU-DENG-Lab/wla_libero_all_image_acton \
+    --model_id SJTU-DENG-Lab/wla_libero_all_image_action \
     --run_id_note None \
     --use_wandb False \
     --checkpoints_dir "" \
