@@ -2,7 +2,7 @@
     <img src="assets/logo.png?raw=true" width="240" style="margin-bottom: 0.1;"/>
 <p>
 <h3 align="center">
-  <a href="https://github.com/SJTU-DENG-Lab/WLA">World-Language-Action Model for Unified World Modeling,<br>Language Reasoning, and Action Synthesis</a>
+  <a href="https://github.com/SJTU-DENG-Lab/WLA">[CoRL 2026] World-Language-Action Model for Unified World Modeling,<br>Language Reasoning, and Action Synthesis</a>
 </h3>
 <h4 align="center"> 
   If you find our project helpful, please give us a star ⭐ to support us 🙏🙏
