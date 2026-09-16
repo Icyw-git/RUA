@@ -1,0 +1,20 @@
+{
+  "suite": "libero_spatial",
+  "task_order_index": 0,
+  "task_ids": [0, 1, 2],
+  "debug_init_state_id": 0,
+  "eval_init_state_ids": [1, 2, 3, 4, 5],
+  "model_seed": 7,
+  "environment_seed": 0,
+  "max_env_steps": 220,
+  "settle_steps": 10,
+  "episode_timeout_seconds": 900,
+  "max_agent_requests": 100,
+  "render_resolution": 512,
+  "image_size": [256, 256],
+  "history_obs_step": 8,
+  "model_id": "SJTU-DENG-Lab/wla_libero_all_image_action",
+  "unnorm_key": "libero_all",
+  "wla_commit": "5662058f3ead8a1b4fec9865acce21dd2f5efbf1",
+  "libero_commit": "8f1084e3132a39270c3a13ebe37270a43ece2a01"
+}

@@ -1,0 +1,9 @@
+{
+  "backend": "qwen",
+  "base_url": "",
+  "model": "",
+  "auth_env_file": "",
+  "auth_key_name": "RUA_QWEN_API_KEY",
+  "deployment": "configure_your_own_compatible_service",
+  "robot_specific_finetuning": false
+}

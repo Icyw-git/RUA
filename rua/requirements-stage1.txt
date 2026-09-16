@@ -1,0 +1,24 @@
+# WLA's original LIBERO environment, flattened without changing version pins.
+torch==2.3.0
+torchvision==0.18.0
+transformers==4.57.0
+accelerate==1.10.1
+diffusers==0.34.0
+numpy==1.26.4
+wandb==0.22.0
+matplotlib==3.10.7
+draccus==0.10.0
+qwen-vl-utils
+imageio[ffmpeg]
+robosuite==1.4.0
+mujoco==3.3.3
+bddl==1.0.1
+easydict==1.9
+cloudpickle==2.1.0
+gym==0.25.2
+termcolor==3.3.0
+future==1.0.0
+# Installation / simulator verification only; not model modifications.
+pytest>=8,<9
+PyYAML>=6,<7
+opencv-python-headless==4.11.0.86

@@ -1,0 +1,161 @@
+{
+  "wla_commit": "5662058f3ead8a1b4fec9865acce21dd2f5efbf1",
+  "models": [
+    {
+      "repo_id": "SJTU-DENG-Lab/wla_libero_all_image_action",
+      "revision": "cd01fd32234bf082b1fbf3ced3ce5d666219d219",
+      "files": [
+        {
+          "name": "config.json",
+          "size": 1901,
+          "lfs_sha256": null,
+          "verified_sha256": "4a4dc0ccff33edc98fe16343fc8fda544f04e8bd46c5d0b0cdc55dad1769bf67"
+        },
+        {
+          "name": "model-00001-of-00002.safetensors",
+          "size": 4998039960,
+          "lfs_sha256": "06b612e83b03aebcd4dd9396c0a1af7d57b3ca90192ac1ee055acd1ff40141ea",
+          "verified_sha256": "06b612e83b03aebcd4dd9396c0a1af7d57b3ca90192ac1ee055acd1ff40141ea"
+        },
+        {
+          "name": "model-00002-of-00002.safetensors",
+          "size": 3557126640,
+          "lfs_sha256": "7a6776d3fa034303dc194c5ea214a4506ad48b5b926c6415cb00ee5c82a21bbb",
+          "verified_sha256": "7a6776d3fa034303dc194c5ea214a4506ad48b5b926c6415cb00ee5c82a21bbb"
+        },
+        {
+          "name": "model.safetensors.index.json",
+          "size": 198936,
+          "lfs_sha256": null,
+          "verified_sha256": "d28199130373864fcbd1eefc99a07fe2a9f9a907a251c4f9c852331d2534ffb7"
+        }
+      ]
+    },
+    {
+      "repo_id": "Alibaba-DAMO-Academy/RynnBrain-2B",
+      "revision": "ad71236d013ae5618833fded73a32569045a8e9e",
+      "files": [
+        {
+          "name": "added_tokens.json",
+          "size": 707,
+          "lfs_sha256": null,
+          "verified_sha256": "c0284b582e14987fbd3d5a2cb2bd139084371ed9acbae488829a1c900833c680"
+        },
+        {
+          "name": "chat_template.jinja",
+          "size": 5292,
+          "lfs_sha256": null,
+          "verified_sha256": "3636d0f0bd6bef02654cdffdc447b79cb2cef8ab02cc75267345946291a489e4"
+        },
+        {
+          "name": "config.json",
+          "size": 1600,
+          "lfs_sha256": null,
+          "verified_sha256": "c22c606103906e51c712308e48a62fb5bcffca3a853064cab34790c7389b17c8"
+        },
+        {
+          "name": "generation_config.json",
+          "size": 199,
+          "lfs_sha256": null,
+          "verified_sha256": "3ff2e83a0510cccccc85c8c96c7df4207985c098b526d798bc2bc68e50bb1a41"
+        },
+        {
+          "name": "merges.txt",
+          "size": 1671853,
+          "lfs_sha256": null,
+          "verified_sha256": "8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5"
+        },
+        {
+          "name": "model.safetensors",
+          "size": 4877470336,
+          "lfs_sha256": "ac4ae115b483763cac87d42e6971c2754ed0ffc7f63096a92168fef73920cf51",
+          "verified_sha256": "ac4ae115b483763cac87d42e6971c2754ed0ffc7f63096a92168fef73920cf51"
+        },
+        {
+          "name": "preprocessor_config.json",
+          "size": 782,
+          "lfs_sha256": null,
+          "verified_sha256": "93585062a80db5e8ca038efc7726a3e6411d9db948472d81d63c6303993be8c5"
+        },
+        {
+          "name": "special_tokens_map.json",
+          "size": 613,
+          "lfs_sha256": null,
+          "verified_sha256": "76862e765266b85aa9459767e33cbaf13970f327a0e88d1c65846c2ddd3a1ecd"
+        },
+        {
+          "name": "tokenizer.json",
+          "size": 11422654,
+          "lfs_sha256": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
+          "verified_sha256": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4"
+        },
+        {
+          "name": "tokenizer_config.json",
+          "size": 5445,
+          "lfs_sha256": null,
+          "verified_sha256": "81ec7bb9530159b326c0bef1d0b6c33d392090524014ea3f0123a3c1eb9c2af5"
+        },
+        {
+          "name": "video_preprocessor_config.json",
+          "size": 817,
+          "lfs_sha256": null,
+          "verified_sha256": "59c5c9eb52182eb14c06ffb10ca9effd29adce5f238a95de23ca14a38dbd2cb1"
+        },
+        {
+          "name": "vocab.json",
+          "size": 2776833,
+          "lfs_sha256": null,
+          "verified_sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910"
+        }
+      ]
+    },
+    {
+      "repo_id": "SJTU-DENG-Lab/Sana_600M_512px_diffusers_64channels",
+      "revision": "dccf14061e06994e999cceb17cce700dcc1b3c78",
+      "files": [
+        {
+          "name": "LICENSE.txt",
+          "size": 5391,
+          "lfs_sha256": null,
+          "verified_sha256": "bee3eaa0082ba7494fd049e0bbcf3b1452ccd094bea948c01494f062119fe9e9"
+        },
+        {
+          "name": "model_index.json",
+          "size": 401,
+          "lfs_sha256": null,
+          "verified_sha256": "5692423f50e7908bec51264ad39e5a9b7566970600f6089a0a40759524f5569b"
+        },
+        {
+          "name": "scheduler/scheduler_config.json",
+          "size": 840,
+          "lfs_sha256": null,
+          "verified_sha256": "70e8603120cc387316aa3bc7f08cb2872f6b6eb6eff6f25df1b88b6b76389e81"
+        },
+        {
+          "name": "transformer/config.json",
+          "size": 740,
+          "lfs_sha256": null,
+          "verified_sha256": "1f3c1ba7b3d2319c576147fa59ad9a6b7389bb38153494ee364ce3f12c95815f"
+        },
+        {
+          "name": "transformer/diffusion_pytorch_model.safetensors",
+          "size": 2367349576,
+          "lfs_sha256": "d02707f966f29d366e1e3fe0d8a4313eb45b20b7658a6b0d78c01ee62b66fe0d",
+          "verified_sha256": "d02707f966f29d366e1e3fe0d8a4313eb45b20b7658a6b0d78c01ee62b66fe0d"
+        },
+        {
+          "name": "vae/config.json",
+          "size": 1280,
+          "lfs_sha256": null,
+          "verified_sha256": "4e5669aa03caa77615b73b21c9347c384cb11124a9590683e32a510df0176eb4"
+        },
+        {
+          "name": "vae/diffusion_pytorch_model.safetensors",
+          "size": 1249044836,
+          "lfs_sha256": "15a4b09e56d95b768a0ec9da50b702e21d920333fc9b3480d66bb5c7fad9d87f",
+          "verified_sha256": "15a4b09e56d95b768a0ec9da50b702e21d920333fc9b3480d66bb5c7fad9d87f"
+        }
+      ]
+    }
+  ]
+}

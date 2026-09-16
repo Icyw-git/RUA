@@ -1,0 +1,59 @@
+{
+  "collection_url": "https://huggingface.co/collections/SJTU-DENG-Lab/wla",
+  "selection_basis": "Pinned WLA source and collection inspected through user-selected HTTPS hf-mirror",
+  "collection_inspection": {
+    "endpoint": "https://hf-mirror.com/api/collections/SJTU-DENG-Lab/wla",
+    "snapshot": "not_bundled; selection is locked by model-revisions.json",
+    "sha256": "d05f99ab2c6555f60f6671e7699eadbfe64bbe9ede6b7e1eaed78cc644d63856"
+  },
+  "wla_commit": "5662058f3ead8a1b4fec9865acce21dd2f5efbf1",
+  "source_files": [
+    "README.md",
+    "configs/libero_all_image_action.yaml",
+    "models/wla.py",
+    "models/model.py"
+  ],
+  "selected_repos": [
+    {
+      "repo_id": "SJTU-DENG-Lab/wla_libero_all_image_action",
+      "purpose": "Native LIBERO checkpoint"
+    },
+    {
+      "repo_id": "Alibaba-DAMO-Academy/RynnBrain-2B",
+      "purpose": "Backbone and processor dependency"
+    },
+    {
+      "repo_id": "SJTU-DENG-Lab/Sana_600M_512px_diffusers_64channels",
+      "purpose": "VAE, transformer and scheduler dependency; no Sana text encoder/tokenizer used by WLA",
+      "allow_patterns": [
+        "LICENSE.txt",
+        "model_index.json",
+        "scheduler/*.json",
+        "transformer/*.json",
+        "transformer/diffusion_pytorch_model.safetensors",
+        "vae/*.json",
+        "vae/diffusion_pytorch_model.safetensors"
+      ]
+    }
+  ],
+  "expected_dependency_ids": {
+    "mllm_id": "Alibaba-DAMO-Academy/RynnBrain-2B",
+    "vae_id": "SJTU-DENG-Lab/Sana_600M_512px_diffusers_64channels",
+    "diffusion_model_id": "SJTU-DENG-Lab/Sana_600M_512px_diffusers_64channels",
+    "scheduler_id": "SJTU-DENG-Lab/Sana_600M_512px_diffusers_64channels",
+    "noise_scheduler_id": "SJTU-DENG-Lab/Sana_600M_512px_diffusers_64channels"
+  },
+  "excluded_for_stage1": [
+    "RoboTwin checkpoints",
+    "RMBench checkpoints",
+    "Video co-training checkpoints",
+    "Training datasets; LIBERO evaluation assets are in the pinned source archive"
+  ],
+  "storage": {
+    "model_cache": "${RUA_ROOT}/models/huggingface/hub",
+    "verified_model_lock": "${RUA_ROOT}/models/wla-models.lock.json",
+    "runtime": "${RUA_RUNTIME}",
+    "artifacts": "${RUA_ROOT}/artifacts/wla-stage1"
+  },
+  "note": "Selection manifest only. No downloaded revisions or model-readiness claim."
+}

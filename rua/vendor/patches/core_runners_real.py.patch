@@ -1,0 +1,186 @@
+--- a/core/runners/real.py
++++ b/core/runners/real.py
+@@ -1,3 +1,5 @@
++# RUA modification (2026-09-15): optional LIBERO lifecycle/scoring/budget boundary;
++# original planner/controller loop retained. See ../../../../SHOW_HARNESS_REUSE.md.
+ """Real-robot VLM closed-loop rollout runner.
+ 
+ This is the real-robot counterpart of :class:`core.subgoal_runner.EpisodeRunnerV0`.
+@@ -31,16 +33,18 @@
+ 
+ import json
+ import time
+-from typing import Any, Optional
++from typing import Any, Optional, TYPE_CHECKING
+ 
+ import numpy as np
+ 
+ import core.ui.console as console
+ from core.action_units import MOVE_ATOMS, ROTATE_ATOMS
+-from interpreters.franka_atomic_controller import AtomicStepResult, FrankaAtomicController
++from interpreters.real_atomic_controller import AtomicStepResult
+ from core.runners.preemption import InterruptibleDecider
+ from core.record.episode_logger import EpisodeLogger, status_flags
+-from core.franka.franka_session import FrankaSession
++if TYPE_CHECKING:
++    from interpreters.franka_atomic_controller import FrankaAtomicController
++    from core.franka.franka_session import FrankaSession
+ from core.record.images import to_uint8_hwc
+ from core.v0_types import EpisodeResult, SkillContext, Subgoal, V0Config
+ from plugins.subgoal import SubgoalPlanner
+@@ -86,6 +90,7 @@
+         action_ablation_plugin: Any = None,
+         recent_moves_max: int = RECENT_MOVES_MAX,
+         viewer: Any = None,
++        environment_boundary: Any = None,
+     ) -> None:
+         self.session = session
+         self.controller = controller
+@@ -115,6 +120,9 @@
+         self._prev_target_in_wrist = False
+         self.recent_moves_max = max(1, int(recent_moves_max))
+         self.viewer = viewer
++        # RUA adaptation: optional simulation lifecycle/scoring/budget boundary.
++        # The planner/controller/stage loop remains the upstream implementation.
++        self.environment_boundary = environment_boundary
+         # DAGGER: real-time human keyboard override (plugins.dagger, single mode). Keys
+         # arrive on the live view's stream thread; the runner consumes them at step
+         # boundaries and preempts/drops in-flight VLM decisions (see
+@@ -162,9 +170,12 @@
+ 
+         # Start from a known, open-gripper state. The controller is already synced
+         # (and the Z floor locked) by the caller before the rollout begins.
+-        self.controller.step(RELEASE_TOKEN)
+-
+         try:
++            if self.environment_boundary is None:
++                self.controller.step(RELEASE_TOKEN)
++            else:
++                # LIBERO was reset with the native ten open-gripper settling steps.
++                self.environment_boundary.check_budget()
+             obs = self.session.get_observation()
+             agentview, wrist = self._images(obs)
+             if self.planner is not None:
+@@ -251,6 +262,8 @@
+             self._print_plan(subgoals)
+ 
+             for step_idx in range(self.max_steps):
++                if self.environment_boundary is not None:
++                    self.environment_boundary.check_budget()
+                 steps = step_idx + 1
+                 loop_started = time.monotonic()
+                 subgoal = subgoals[current_index]
+@@ -459,6 +472,13 @@
+                         target_in_wrist=target_in_wrist,
+                         continuous=bool(chunk_queue),
+                     )
++                    if getattr(result, "kind", None) == "handoff":
++                        # Environment boundary executed a counted hold, not the proposed
++                        # action. Re-observe next iteration; never retain a stale command.
++                        token = result.token
++                        chunk_queue = []
++                        current_direction = None
++                        self._prev_target_in_wrist = False
+ 
+                 subgoal_done = bool(getattr(result, "done", False)) or token == DONE_TOKEN
+                 # How much of a commanded MV_DOWN the arm actually travelled, for the
+@@ -466,12 +486,19 @@
+                 # against something (see plugins.proprioception).
+                 self._descend = descend_travel(token, result, self._descend)
+ 
+-                post_recovery = self._recovery_after_step(
++                recovery_obs = (
++                    self.session.get_observation()
++                    if self.environment_boundary is not None else obs
++                )
++                post_recovery = None if (
++                    self.environment_boundary is not None
++                    and self.environment_boundary.success()
++                ) else self._recovery_after_step(
+                     token=token,
+                     result=result,
+                     current_index=current_index,
+                     subgoals=subgoals,
+-                    obs=obs,
++                    obs=recovery_obs,
+                     subgoal_done=subgoal_done,
+                 )
+                 if post_recovery is not None:
+@@ -503,6 +530,10 @@
+                         recovery_note += " (at Z floor; descent exhausted)"
+ 
+                 plan_complete = subgoal_done and (current_index + 1 >= len(subgoals))
++                scored_success = (
++                    self.environment_boundary.success()
++                    if self.environment_boundary is not None else plan_complete
++                )
+                 if recovery_decision is not None and recovery_decision.reset_history:
+                     current_direction = None
+                     recent_moves.clear()
+@@ -520,6 +551,12 @@
+                     recent_moves.insert(0, token)
+                     del recent_moves[self.recent_moves_max:]
+                     current_direction = None
++                elif getattr(result, "kind", None) in ("delegated", "handoff"):
++                    # RUA: a bounded policy call invalidates the old atomic direction.
++                    # Do not mark the stage done or reset the executor's step history.
++                    recent_moves.insert(0, token)
++                    del recent_moves[self.recent_moves_max:]
++                    current_direction = None
+                 elif token in GRIPPER_TOKENS or subgoal_done:
+                     current_direction = None
+ 
+@@ -548,7 +585,7 @@
+                     response=response,
+                     obs=obs,
+                     subgoal_done=subgoal_done,
+-                    success=plan_complete,
++                    success=scored_success,
+                     recovery_decision=recovery_decision,
+                     human_kind=human_kind,
+                 )
+@@ -585,9 +622,15 @@
+                 )
+                 self._write_action_table(step_idx)
+ 
++                if scored_success:
++                    success = True
++                    end_reason = (
++                        "official_success" if self.environment_boundary is not None
++                        else "plan_complete"
++                    )
++                    break
+                 if plan_complete:
+-                    success = True
+-                    end_reason = "plan_complete"
++                    end_reason = "agent_done_without_official_success"
+                     break
+                 if (
+                     recovery_decision is not None
+@@ -622,7 +665,14 @@
+                 "\n[run-real] Ctrl+C received -- stopping rollout and compiling the "
+                 "visualization video..."
+             )
++        except Exception as exc:
++            if self.environment_boundary is None:
++                raise
++            end_reason = self.environment_boundary.record_error(exc)
++            success = self.environment_boundary.success()
+         finally:
++            if self.environment_boundary is not None:
++                success = self.environment_boundary.success()
+             video_path = self.logger.close(
+                 success=success, fps=video_fps(self.config.video_fps)
+             )
+@@ -634,7 +684,10 @@
+                     "end_reason": end_reason,
+                     "video_path": str(video_path),
+                     "run_dir": str(self.logger.run_dir),
+-                    "control_mode": "real",
++                    "control_mode": (
++                        self.environment_boundary.name
++                        if self.environment_boundary is not None else "real"
++                    ),
+                     "task": self.task,
+                     "gripper_color": self.gripper_color,
+                     "z_floor_m": self.controller.z_floor_m,
