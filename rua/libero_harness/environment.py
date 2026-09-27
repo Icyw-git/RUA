@@ -41,6 +41,7 @@ class LiberoSession:
         self.last_control_mode = "initialization"
         self.gripper_authority = "initialization"
         self.last_handoff = None
+        self.agent_decision_index = None
         self.video_frames = 0
         self.trace = (directory / "environment-steps.jsonl").open("w")
         self.writers = {
@@ -89,7 +90,8 @@ class LiberoSession:
 
     def emit(self, record):
         record.update(elapsed_seconds=time.monotonic() - self.budget.started,
-                      eef_pose=pose(self.obs).tolist(), gripper_width_m=width(self.obs))
+                      eef_pose=pose(self.obs).tolist(), gripper_width_m=width(self.obs),
+                      decision_index=self.agent_decision_index)
         self.trace.write(json.dumps(record, allow_nan=False) + "\n")
         self.trace.flush()
 
@@ -105,7 +107,16 @@ class LiberoSession:
         attempt = self.attempts
         self.attempts += 1
         self.uncertain_step = dict(attempt=attempt, token=token, action=array.tolist())
-        self.emit(dict(event="step_started", phase=phase, **self.uncertain_step))
+        self.emit(dict(
+            event="step_started", phase=phase,
+            observation_sequence=self.trajectory.sequence,
+            task_step=self.budget.steps,
+            proprioception_before={
+                key: np.asarray(self.obs[key], dtype=float).tolist()
+                for key in ("robot0_eef_pos", "robot0_eef_quat", "robot0_gripper_qpos")
+            },
+            **self.uncertain_step,
+        ))
         # Snapshot BEFORE stepping, including when an environment reuses its arrays.
         before = copy_native_observation(self.obs)
         obs, reward, done, _ = self.env.step(array.tolist())

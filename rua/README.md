@@ -4,6 +4,8 @@
 Opus 提供模型推理，Show-Harness 的原生 planner/controller/runner 驱动主循环。
 运行总结见交付包 `EXPERIMENT_REPORT.zh.md`；直接复用和适配列表见
 `SHOW_HARNESS_REUSE.md`。不要将这20任务、每任务1初态的工程比较称为官方 benchmark。
+基于轨迹和反馈导出 WLA / agent 数据见 `DATA_DUMP.zh.md`。
+在 `/data1/wcz` 运行单条 LIBERO/WLA episode 的实测命令见 `RUN_LOCAL_WLA.zh.md`。
 
 ## 1. 目录与支持范围
 

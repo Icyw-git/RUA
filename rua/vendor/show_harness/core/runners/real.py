@@ -262,6 +262,10 @@ class RealEpisodeRunner:
             self._print_plan(subgoals)
 
             for step_idx in range(self.max_steps):
+                if self.environment_boundary is not None and hasattr(
+                    self.environment_boundary, "agent_decision_index"
+                ):
+                    self.environment_boundary.agent_decision_index = step_idx
                 if self.environment_boundary is not None:
                     self.environment_boundary.check_budget()
                 steps = step_idx + 1
@@ -929,6 +933,9 @@ class RealEpisodeRunner:
             "w": round(float(obs.get("gripper_width", 0.0)), 5),
             "grip": "CLOSED" if gripper_closed else "OPEN",
         }
+        request_id = (getattr(response, "payload", None) or {}).get("request_id")
+        if request_id is not None:
+            record["model_request_id"] = request_id
         if human_kind is not None:
             # DAGGER: this step's token came from the operator, not the model.
             record["src"] = "human"

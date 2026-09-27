@@ -104,8 +104,16 @@ def validate(args, pilot, cfg):
         signal.signal(sig, interrupted)
     try:
         if not rua_only:
-            worker = WLAWorkerClient(directory / "wla", pilot)
-            result.update(worker_pid=worker.process.pid, worker_startup=worker.startup)
+            service_port = getattr(args, "wla_service_port", None)
+            if service_port:
+                from .service_wla_client import ServiceWLAClient
+                worker = ServiceWLAClient(directory / "wla", pilot, port=service_port)
+                result.update(wla_backend="shared_service", wla_service_port=service_port,
+                              worker_startup=worker.startup)
+            else:
+                worker = WLAWorkerClient(directory / "wla", pilot)
+                result.update(wla_backend="local_worker", worker_pid=worker.process.pid,
+                              worker_startup=worker.startup)
         else:
             import random
             random.seed(pilot["model_seed"])
@@ -196,7 +204,9 @@ def validate(args, pilot, cfg):
         if worker is not None:
             result["wla_predictions"] = worker.records
             worker.close()
-            result.update(worker_exitcode=worker.exitcode, worker_alive=worker.process.poll() is None)
+            result.update(worker_exitcode=worker.exitcode,
+                          worker_alive=(worker.process.poll() is None)
+                          if isinstance(worker, WLAWorkerClient) else False)
         if agent:
             records = client.records if client else []
             usage = {}

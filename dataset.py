@@ -1220,10 +1220,23 @@ def get_train_datasets(data_args, training_args, model_args, tokenize_func, toke
     return train_dataset, eval_dataset, gt_images, gt_depths, src_images, collate_fn
 
 def load_libero_dataset(data_args, model_args, training_args):
-    ds_meta = LeRobotDatasetMetadata(
-        os.path.join(data_args.dataset_root_dir, "libero_spatial_no_noops_lerobot")
+    repo_ids = sorted(
+        os.path.join(data_args.dataset_root_dir, item)
+        for item in os.listdir(data_args.dataset_root_dir)
+        if os.path.isfile(os.path.join(data_args.dataset_root_dir, item, "meta", "info.json"))
     )
+    if not repo_ids:
+        raise ValueError(f"No LeRobot datasets found in {data_args.dataset_root_dir}")
+    metadata_repo = next(
+        (path for path in repo_ids if os.path.basename(path) == "libero_spatial_no_noops_lerobot"),
+        repo_ids[0],
+    )
+    ds_meta = LeRobotDatasetMetadata(metadata_repo)
     primary_image_key, wrist_image_key = ds_meta.camera_keys[0], ds_meta.camera_keys[1]
+    for repo_id in repo_ids:
+        meta = LeRobotDatasetMetadata(repo_id)
+        if meta.fps != ds_meta.fps or meta.camera_keys[:2] != ds_meta.camera_keys[:2]:
+            raise ValueError(f"Incompatible LIBERO fps or camera keys: {repo_id}")
     
     with open(data_args.norm_stats_path, 'r') as f:
         norm_stats = json.load(f)
@@ -1245,14 +1258,22 @@ def load_libero_dataset(data_args, model_args, training_args):
     }
 
     dataset = MultiLeRobotDataset(
-        repo_ids = [
-            os.path.join(data_args.dataset_root_dir, item) 
-                for item in os.listdir(data_args.dataset_root_dir) 
-            if os.path.isdir(os.path.join(data_args.dataset_root_dir, item))
-        ],
+        repo_ids=repo_ids,
         delta_timestamps=delta_timestamps,
         video_backend="pyav"
     )
+
+    # Every training sample uses the image at t + chunk_size. LeRobot pads that
+    # lookup at an episode boundary, so retain only starts with a real future frame.
+    valid_indices = []
+    offset = 0
+    for sub_dataset in dataset._datasets:
+        for episode in sub_dataset.meta.episodes:
+            start = episode["dataset_from_index"]
+            end = episode["dataset_to_index"]
+            valid_indices.extend(range(offset + start, offset + end - model_args.chunk_size))
+        offset += len(sub_dataset)
+    dataset = torch.utils.data.Subset(dataset, valid_indices)
 
     return dataset, norm_stats, primary_image_key, [wrist_image_key]
 
