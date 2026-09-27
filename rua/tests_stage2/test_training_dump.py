@@ -8,7 +8,7 @@ import imageio.v2 as imageio
 import numpy as np
 import pytest
 
-from libero_harness.training_dump import FRONT, WRIST, export, training_action, wla_state
+from libero_harness.training_dump import FRONT, WRIST, export, trace_records, training_action, wla_state
 
 
 def make_episode(root, name, *, success=True, pre_state=True):
@@ -109,6 +109,15 @@ def test_native_state_and_gripper_mapping():
     np.testing.assert_allclose(state[3:6], [0, 0, math.pi / 2], atol=1e-6)
     assert training_action([0, 0, 0, 0, 0, 0, -1])[-1] == 1
     assert training_action([0, 0, 0, 0, 0, 0, 1])[-1] == 0
+
+
+def test_environment_action_kind_does_not_hide_trace_source(tmp_path):
+    records = list(trace_records(tmp_path, [
+        {"event": "atomic_completed", "kind": "move", "token": "MV_DOWN"},
+    ]))
+    assert records == [{"source": str(tmp_path), "kind": "environment",
+                        "event": "atomic_completed", "environment_kind": "move",
+                        "token": "MV_DOWN"}]
 
 
 def test_dump_aligns_frames_and_keeps_failure_feedback(tmp_path, monkeypatch):

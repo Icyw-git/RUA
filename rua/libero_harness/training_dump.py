@@ -155,7 +155,10 @@ def trace_records(directory: Path, events: list[dict]):
     """Keep event streams separate by kind; IDs are captured during execution."""
     source = str(directory)
     for event in events:
-        yield {"source": source, "kind": "environment", **event}
+        record = dict(event)
+        if "kind" in record:
+            record["environment_kind"] = record.pop("kind")
+        yield {"source": source, "kind": "environment", **record}
     native = directory / "native"
     step_directories = (
         sorted({path.parent for pattern in ("steps.json", "steps.jsonl")
