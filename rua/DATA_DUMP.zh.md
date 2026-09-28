@@ -5,7 +5,7 @@
 1. `trace.jsonl` + `feedback.jsonl`：保留成功和失败轨迹，供后续 agent 分析、筛选和训练。
 2. `rua_lerobot/`：只收录通过审计、成功且有完整监督帧的轨迹，供 WLA 训练。
 
-导出是离线操作，不调用模型、不执行环境动作。它读取 RUA 运行目录中的 `result.json`、`environment-steps.jsonl`、`front-control.mp4`、`wrist-control.mp4`、`requests/` 和 `native/`。原始目录要保留：`trace.jsonl` 中的图片路径指向原始目录，不复制 PNG。生成的 LeRobot 视频则在新数据集内，可单独搬运。
+RUA 运行时自动保存 `result.json`、`environment-steps.jsonl`、`front-control.mp4`、`wrist-control.mp4`，以及存在时的 `requests/`、`native/`。目前**不会自动运行**本页的质量筛选、人工复核或 LeRobot 导出；这些步骤由操作者在 episode 完成后手动启动。导出是离线操作，不调用模型、不执行环境动作。原始目录要保留：`trace.jsonl` 中的图片路径指向原始目录，不复制 PNG。生成的 LeRobot 视频则在新数据集内，可单独搬运。
 
 ## 运行
 
