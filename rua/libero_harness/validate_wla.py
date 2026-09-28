@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import signal
 import tempfile
@@ -26,6 +27,14 @@ def interrupted(signum, frame):
     if signum == signal.SIGALRM:
         raise BudgetExhausted("wall_clock_budget")
     raise KeyboardInterrupt("operator_signal")
+
+
+def bddl_language(definition: bytes) -> str:
+    """LIBERO-Pro may change the instruction without renaming the BDDL file."""
+    match = re.search(r"\(:language\s+([^)]*)\)", definition.decode(), re.IGNORECASE)
+    if match is None:
+        raise ValueError("Pro task BDDL has no language instruction")
+    return " ".join(match.group(1).split()).lower()
 
 
 def main():
@@ -63,8 +72,10 @@ def validate(args, pilot, cfg):
     base = ROOT / "artifacts/rua-stage3"
     base.mkdir(parents=True, exist_ok=True)
     mode = "rua_v2_only" if rua_only else "rua_wla_hybrid" if agent else "wla_only_unified_executor"
+    pro_smoke = getattr(args, "pro_bddl_language", False)
     if evaluation is None:
-        directory = Path(tempfile.mkdtemp(prefix=mode + "-debug-", dir=base))
+        suffix = "-pro-smoke-" if pro_smoke else "-debug-"
+        directory = Path(tempfile.mkdtemp(prefix=mode + suffix, dir=base))
     else:
         directory = Path(args.output)
         directory.mkdir(parents=True, exist_ok=False)
@@ -72,7 +83,8 @@ def validate(args, pilot, cfg):
                   task_id=args.task_id, initial_state_id=args.init_id, pilot=pilot,
                   official_success=False, task_steps=0, initialization_steps=0,
                   wla_calls=0, qwen_calls=0, model_requests=0, request_records=[],
-                  benchmark_acceptance=False, scope="debug_not_paired_pilot",
+                  benchmark_acceptance=False,
+                  scope="libero_pro_single_smoke" if pro_smoke else "debug_not_paired_pilot",
                   artifact_directory=str(directory), render_backend="osmesa")
     if agent:
         result.update(backend=cfg["backend"], configuration=cfg, controller_revision=cfg["controller_revision"])
@@ -131,6 +143,9 @@ def validate(args, pilot, cfg):
         states = suite.get_task_init_states(args.task_id)
         definition = Path(get_libero_path("bddl_files")) / task.problem_folder / task.bddl_file
         shutil.copy2(definition, directory / "task.bddl")
+        if pro_smoke:
+            result["filename_language"] = task.language
+            task = task._replace(language=bddl_language(definition.read_bytes()))
         result.update(task_name=task.name, task_instruction=task.language,
                       task_definition_sha256=hashlib.sha256(definition.read_bytes()).hexdigest())
         env, instruction = get_libero_env(task, "wla", resolution=pilot["render_resolution"])

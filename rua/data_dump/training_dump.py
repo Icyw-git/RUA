@@ -13,8 +13,8 @@ from pathlib import Path
 import imageio.v2 as imageio
 import numpy as np
 
-from .audit import audit_episode
-from .paths import save_json
+from libero_harness.audit import audit_episode
+from libero_harness.paths import save_json
 
 
 FPS = 20
@@ -198,7 +198,7 @@ def trace_records(directory: Path, events: list[dict]):
         }
 
 
-def load_review(path: Path | None) -> dict[str, bool] | None:
+def load_review(path: Path | None) -> dict[str, dict] | None:
     if path is None:
         return None
     decisions = {}
@@ -208,8 +208,39 @@ def load_review(path: Path | None) -> dict[str, bool] | None:
             approved = row["approved_for_wla"]
             if not isinstance(approved, bool):
                 raise ValueError("approved_for_wla must be a JSON boolean")
-            decisions[str(Path(row["source"]).resolve())] = approved
+            source = str(Path(row["source"]).resolve())
+            if source in decisions:
+                raise ValueError(f"Duplicate review source: {source}")
+            ranges = row.get("task_step_ranges")
+            if ranges is not None and not approved:
+                raise ValueError("task_step_ranges require approved_for_wla=true")
+            reason = row.get("reason")
+            if reason is not None and not isinstance(reason, str):
+                raise ValueError("Review reason must be a string")
+            decisions[source] = {"approved_for_wla": approved,
+                                 "task_step_ranges": ranges, "reason": reason}
     return decisions
+
+
+def selected_ranges(review: dict | None, task_steps: int) -> list[tuple[int, int]]:
+    """Half-open task-step ranges; each becomes one contiguous training episode."""
+    ranges = review["task_step_ranges"] if review is not None else None
+    if ranges is None:
+        return [(0, task_steps)]
+    if not isinstance(ranges, list) or not ranges:
+        raise ValueError("task_step_ranges must be a non-empty list")
+    selected = []
+    for pair in ranges:
+        if (not isinstance(pair, list) or len(pair) != 2
+                or any(type(value) is not int for value in pair)):
+            raise ValueError("Each task_step_range must be [start, end] with integer indices")
+        start, end = pair
+        if start < 0 or end > task_steps or end - start < 9:
+            raise ValueError("Each task_step_range must contain at least nine in-bounds frames")
+        if selected and start < selected[-1][1]:
+            raise ValueError("task_step_ranges must be sorted and non-overlapping")
+        selected.append((start, end))
+    return selected
 
 
 def export(sources: list[Path], output_root: Path, dataset_name: str,
@@ -226,24 +257,46 @@ def export(sources: list[Path], output_root: Path, dataset_name: str,
         events = [json.loads(line) for line in
                   (directory / "environment-steps.jsonl").read_text().splitlines()]
         episode_rows.append((directory, events))
+        review_row = approvals.get(str(directory)) if approvals is not None else None
+        review_approved = (None if approvals is None else
+                           bool(review_row and review_row["approved_for_wla"]))
         audit_pass = False
+        rejection_code = None
+        rejection_reason = None
+        ranges = []
+        stage = "legacy_source"
         try:
             if "pilot" not in result:
                 raise ValueError("Legacy rollout schema; no RUA pre-action frame alignment")
+            stage = "audit_failed"
             audit_episode(directory)
             audit_pass = True
+            stage = "task_not_successful"
+            if result.get("status") != "completed" or result.get("official_success") is not True:
+                raise ValueError("Only completed, officially successful episodes enter WLA training")
+            stage = "uncertain_execution"
+            if result.get("uncertain_step") or result.get("cleanup_errors"):
+                raise ValueError("Uncertain step or cleanup error")
+            stage = "training_data_invalid"
             steps = episode_steps(directory, result, events)
-            if approvals is not None and not approvals.get(str(directory), False):
-                raise ValueError("Not approved for WLA in review file")
+            stage = "review_rejected"
+            if review_approved is False:
+                raise ValueError((review_row or {}).get("reason") or
+                                 "Not approved for WLA in review file")
+            stage = "invalid_review_range"
+            ranges = selected_ranges(review_row, len(steps))
+            stage = "camera_incompatible"
             shape = image_shape(directory)
             if image_shape(directory, "wrist") != shape:
                 raise ValueError("Front/wrist image shapes differ")
             if accepted and shape != accepted[0][3]:
                 raise ValueError("Camera shape differs from other selected episodes")
-            accepted.append((directory, result, steps, shape))
-            rejection_reason = None
+            accepted.extend((directory, result, steps[start:end], shape, (start, end))
+                            for start, end in ranges)
         except (AssertionError, KeyError, OSError, ValueError) as exc:
+            rejection_code = stage
             rejection_reason = str(exc)
+        training_starts = sum(end - start - 8 for start, end in ranges) if rejection_code is None else 0
         feedback.append({
             "source": str(directory), "status": result.get("status"),
             "official_success": result.get("official_success"),
@@ -254,10 +307,17 @@ def export(sources: list[Path], output_root: Path, dataset_name: str,
             "suite": result.get("pilot", {}).get("suite", result.get("suite")),
             "mode": result.get("mode"), "backend": result.get("backend"),
             "task_steps": result.get("task_steps"),
+            "elapsed_seconds": result.get("elapsed_seconds"),
             "model_requests": result.get("model_requests", result.get("model_calls")),
+            "wla_calls": result.get("wla_calls"),
+            "control_tokens": sorted({event["token"] for event in events
+                                      if event.get("event") == "step_completed"
+                                      and event.get("phase") == "task" and "token" in event}),
             "audit_pass": audit_pass,
-            "review_approved": approvals.get(str(directory), False) if approvals is not None else None,
-            "wla_candidate": rejection_reason is None,
+            "review_approved": review_approved,
+            "wla_candidate": rejection_code is None,
+            "wla_training_starts": training_starts,
+            "rejection_code": rejection_code,
             "rejection_reason": rejection_reason,
         })
     output_root.mkdir(parents=True, exist_ok=True)
@@ -267,12 +327,13 @@ def export(sources: list[Path], output_root: Path, dataset_name: str,
                  for record in trace_records(directory, events)))
     if approvals is not None:
         write_jsonl(output_root / "review.jsonl",
-                    ({"source": source, "approved_for_wla": approved}
-                     for source, approved in sorted(approvals.items())))
-    manifest = {"version": 1, "dataset": dataset_name if accepted else None, "fps": FPS,
+                    ({"source": source, **{key: value for key, value in decision.items()
+                                            if value is not None}}
+                     for source, decision in sorted(approvals.items())))
+    manifest = {"version": 2, "dataset": dataset_name if accepted else None, "fps": FPS,
                 "state": STATE_NAMES, "action": ACTION_NAMES,
                 "wla_chunk_size": 8,
-                "selection": "audit passed; official success; complete aligned frames; optional review approval",
+                "selection": "audit passed; official success; aligned frames; optional reviewed task-step ranges",
                 "gripper_mapping": "environment -1 => training 1; environment +1 => training 0",
                 "episodes": [], "feedback_file": "feedback.jsonl", "trace_file": "trace.jsonl",
                 "review_file": "review.jsonl" if approvals is not None else None}
@@ -284,10 +345,11 @@ def export(sources: list[Path], output_root: Path, dataset_name: str,
             robot_type="libero", features=features(shape), use_videos=True, vcodec="h264",
         )
         try:
-            for directory, result, steps, _ in accepted:
+            for directory, result, steps, _, task_step_range in accepted:
                 append_episode(dataset, directory, result, steps, shape)
                 manifest["episodes"].append({
                     "episode_index": len(manifest["episodes"]), "source": str(directory),
+                    "task_step_range": list(task_step_range),
                     "suite": result.get("pilot", {}).get("suite"),
                     "task_id": result.get("task_id"), "initial_state_id": result.get("initial_state_id"),
                     "mode": result.get("mode"), "backend": result.get("backend"),
@@ -307,7 +369,8 @@ def main() -> int:
     parser.add_argument("sources", nargs="+", type=Path, help="Episode or run directories")
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--dataset-name", default="rua_lerobot")
-    parser.add_argument("--review", type=Path, help="JSONL source + approved_for_wla decisions")
+    parser.add_argument("--review", type=Path,
+                        help="JSONL source + approved_for_wla + optional task_step_ranges")
     args = parser.parse_args()
     report = export(args.sources, args.output_root, args.dataset_name, args.review)
     print(json.dumps({"output": str(args.output_root), "episodes": len(report["episodes"]),

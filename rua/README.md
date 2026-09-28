@@ -7,6 +7,12 @@ Opus 提供模型推理，Show-Harness 的原生 planner/controller/runner 驱�
 基于轨迹和反馈导出 WLA / agent 数据见 `DATA_DUMP.zh.md`。
 在 `/data1/wcz` 运行单条 LIBERO/WLA episode 的实测命令见 `RUN_LOCAL_WLA.zh.md`。
 
+代码按用途放置：`libero_harness/` 是正式控制与采集运行时；
+`data_dump/` 只离线读取已完成的轨迹，完成质量筛选、仿真回放、人工复核和训练数据导出；
+`rua_experiments/` 放单条 Pro 试跑入口；`tests_data_dump/` 放离线数据工具测试，
+`tests_stage2/`、`tests_stage3/` 放运行时测试。离线回放的环境脚本在 `scripts/offline/`。
+原始 episode 和生成的审核包位于 `/data1/wcz/artifacts/` 与 `/data1/wcz/rua-dumps/`，不放入运行时包。
+
 ## 1. 目录与支持范围
 
 ```text

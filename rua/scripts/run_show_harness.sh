@@ -33,7 +33,7 @@ case "$mode" in
     ;;
   test)
     cd "$RUA_CODE"
-    exec "$RUA_VENV_PYTHON" -m pytest -q -p no:cacheprovider tests_stage2 "$@"
+    exec "$RUA_VENV_PYTHON" -m pytest -q -p no:cacheprovider tests_stage2 tests_data_dump "$@"
     ;;
   calibrate)
     # Full 48-probe CPU-rendered installation calibration; not an episode budget.

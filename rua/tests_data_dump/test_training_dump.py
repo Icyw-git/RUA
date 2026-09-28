@@ -8,13 +8,13 @@ import imageio.v2 as imageio
 import numpy as np
 import pytest
 
-from libero_harness.training_dump import FRONT, WRIST, export, trace_records, training_action, wla_state
+from data_dump.training_dump import FRONT, WRIST, export, trace_records, training_action, wla_state
 
 
-def make_episode(root, name, *, success=True, pre_state=True):
+def make_episode(root, name, *, success=True, pre_state=True, task_steps=9):
     directory = root / name
     directory.mkdir()
-    settle, task_steps = 2, 9
+    settle = 2
     events = []
     for attempt in range(settle + task_steps):
         phase = "initialization" if attempt < settle else "task"
@@ -62,7 +62,7 @@ def make_episode(root, name, *, success=True, pre_state=True):
         with imageio.get_writer(directory / f"{camera}-control.mp4", fps=20,
                                 codec="libx264", macro_block_size=1) as writer:
             for frame in range(settle + task_steps + 1):
-                writer.append_data(np.full((16, 16, 3), frame * 10, dtype=np.uint8))
+                writer.append_data(np.full((16, 16, 3), frame * 10 % 256, dtype=np.uint8))
     return directory
 
 
@@ -130,6 +130,7 @@ def test_dump_aligns_frames_and_keeps_failure_feedback(tmp_path, monkeypatch):
     manifest = export([source], output, "rua_lerobot")
 
     assert len(manifest["episodes"]) == 1
+    assert manifest["episodes"][0]["task_step_range"] == [0, 9]
     dataset = FakeLeRobotDataset.created[0]
     assert dataset.finalized and dataset.kwargs["fps"] == 20
     assert list(dataset.kwargs["features"]) == [FRONT, WRIST, "observation.state", "action"]
@@ -144,8 +145,11 @@ def test_dump_aligns_frames_and_keeps_failure_feedback(tmp_path, monkeypatch):
 
     feedback = [json.loads(line) for line in (output / "feedback.jsonl").read_text().splitlines()]
     assert len(feedback) == 2
-    assert next(row for row in feedback if row["source"] == str(successful))["wla_candidate"]
-    assert not next(row for row in feedback if row["source"] != str(successful))["wla_candidate"]
+    selected = next(row for row in feedback if row["source"] == str(successful))
+    rejected = next(row for row in feedback if row["source"] != str(successful))
+    assert selected["wla_candidate"] and selected["wla_training_starts"] == 1
+    assert not rejected["wla_candidate"]
+    assert rejected["rejection_code"] == "task_not_successful"
     trace = [json.loads(line) for line in (output / "trace.jsonl").read_text().splitlines()]
     assert {row["kind"] for row in trace} == {"environment", "agent_decision",
                                              "agent_artifact", "model_request"}
@@ -177,6 +181,55 @@ def test_review_keeps_rejected_success_in_feedback(tmp_path):
     assert feedback["review_approved"] is False
     assert feedback["official_success"] is True
     assert feedback["wla_candidate"] is False
+    assert feedback["rejection_code"] == "review_rejected"
+    assert feedback["wla_training_starts"] == 0
+
+
+def test_review_selects_contiguous_task_step_ranges(tmp_path, monkeypatch):
+    install_fake_lerobot(monkeypatch)
+    source = make_episode(tmp_path, "successful", task_steps=20)
+    review = tmp_path / "review-input.jsonl"
+    review.write_text(json.dumps({
+        "source": str(source), "approved_for_wla": True,
+        "task_step_ranges": [[0, 9], [11, 20]],
+        "reason": "Keep two reviewed action sequences",
+    }) + "\n")
+    output = tmp_path / "dump"
+    manifest = export([source], output, "rua_lerobot", review)
+
+    assert manifest["version"] == 2
+    assert [row["task_step_range"] for row in manifest["episodes"]] == [[0, 9], [11, 20]]
+    assert [row["wla_training_starts"] for row in manifest["episodes"]] == [1, 1]
+    dataset = FakeLeRobotDataset.created[0]
+    assert [len(episode) for episode in dataset.episodes] == [9, 9]
+    assert dataset.episodes[0][0]["observation.state"][0] == 2
+    assert dataset.episodes[1][0]["observation.state"][0] == 13
+    feedback = json.loads((output / "feedback.jsonl").read_text())
+    assert feedback["wla_candidate"] is True
+    assert feedback["wla_training_starts"] == 2
+    assert feedback["control_tokens"] == ["MV_UP"]
+    saved_review = json.loads((output / "review.jsonl").read_text())
+    assert saved_review["task_step_ranges"] == [[0, 9], [11, 20]]
+    assert saved_review["reason"] == "Keep two reviewed action sequences"
+
+
+@pytest.mark.parametrize("ranges", [
+    [[0, 8]], [[0, 10], [9, 20]], [[0, 9], [20, 29]],
+])
+def test_invalid_review_ranges_keep_trace_and_feedback(tmp_path, ranges):
+    source = make_episode(tmp_path, "successful", task_steps=20)
+    review = tmp_path / "review-input.jsonl"
+    review.write_text(json.dumps({"source": str(source), "approved_for_wla": True,
+                                  "task_step_ranges": ranges}) + "\n")
+    output = tmp_path / "dump"
+    manifest = export([source], output, "rua_lerobot", review)
+
+    assert manifest["episodes"] == []
+    assert (output / "trace.jsonl").stat().st_size > 0
+    feedback = json.loads((output / "feedback.jsonl").read_text())
+    assert feedback["audit_pass"] is True
+    assert feedback["rejection_code"] == "invalid_review_range"
+    assert feedback["wla_training_starts"] == 0
 
 
 def test_session_records_pre_action_state_and_decision_id(tmp_path, monkeypatch):
@@ -257,10 +310,14 @@ def test_real_lerobot_roundtrip(tmp_path):
 def test_wla_train_loader_roundtrip(tmp_path):
     pytest.importorskip("lerobot.datasets.lerobot_dataset")
     wla_dataset = pytest.importorskip("dataset")
-    source = make_episode(tmp_path, "episode")
-    second = make_episode(tmp_path, "episode_2")
+    source = make_episode(tmp_path, "episode", task_steps=20)
+    review = tmp_path / "review-input.jsonl"
+    review.write_text(json.dumps({
+        "source": str(source), "approved_for_wla": True,
+        "task_step_ranges": [[0, 9], [11, 20]],
+    }) + "\n")
     output = tmp_path / "dump"
-    export([source, second], output, "rua_lerobot")
+    export([source], output, "rua_lerobot", review)
     data_args = SimpleNamespace(dataset_root_dir=str(output),
                                 norm_stats_path="/data1/wcz/WLA/configs/norm_stats.json",
                                 unnorm_key="libero_all")
