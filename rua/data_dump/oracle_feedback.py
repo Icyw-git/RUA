@@ -43,6 +43,13 @@ def replay(source: Path, output: Path) -> dict:
         goal_states = env.env.parsed_problem["goal_state"]
         names = sorted({name for state in goal_states for name in state[1:]
                         if name in env.env.obj_body_id})
+        target_objects = sorted({state[1] for state in goal_states
+                                 if len(state) > 1 and state[1] in env.env.objects_dict})
+        object_radii = {name: float(obj.horizontal_radius)
+                        for name, obj in env.env.objects_dict.items()}
+        gripper = env.env.robots[0].gripper
+        fixture_joints = sorted({joint for fixture in env.env.fixtures_dict.values()
+                                 for joint in fixture.joints})
         for event in completed:
             observation, _, _, _ = env.step(event["action"])
             pose_error = float(np.linalg.norm(
@@ -64,6 +71,22 @@ def replay(source: Path, output: Path) -> dict:
                     name: np.asarray(env.sim.data.body_xpos[env.env.obj_body_id[name]],
                                      dtype=float).tolist() for name in names
                 },
+                "all_object_positions_m": {
+                    name: np.asarray(env.sim.data.body_xpos[env.env.obj_body_id[name]],
+                                     dtype=float).tolist()
+                    for name in sorted(env.env.objects_dict)
+                },
+                "eef_position_m": np.asarray(observation["robot0_eef_pos"],
+                                              dtype=float).tolist(),
+                "gripper_command": float(event["action"][-1]),
+                "grasped_objects": sorted(
+                    name for name, obj in env.env.objects_dict.items()
+                    if env.env._check_grasp(gripper, obj)
+                ),
+                "fixture_joint_positions": {
+                    name: float(env.sim.data.qpos[env.sim.model.get_joint_qpos_addr(name)])
+                    for name in fixture_joints
+                },
                 "official_success": bool(event["official_success"]),
             })
             task_step += 1
@@ -72,9 +95,12 @@ def replay(source: Path, output: Path) -> dict:
     if task_step != result["task_steps"]:
         raise ValueError("Replayed task step count differs from result.json")
     report = {
-        "version": 1, "source": str(source), "scope": result.get("scope"),
+        "version": 2, "source": str(source), "scope": result.get("scope"),
         "task_steps": task_step, "verified_max_eef_position_error_m": max_pose_error_m,
         "source_trace_sha256": hashlib.sha256(trace_file.read_bytes()).hexdigest(),
+        "target_objects": target_objects,
+        "goal_states": goal_states,
+        "object_horizontal_radius_m": object_radii,
         "feedback_file": "oracle-feedback.jsonl",
         "observation_time": "after each completed task action",
     }

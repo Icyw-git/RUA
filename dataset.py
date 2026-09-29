@@ -1227,6 +1227,10 @@ def load_libero_dataset(data_args, model_args, training_args):
     )
     if not repo_ids:
         raise ValueError(f"No LeRobot datasets found in {data_args.dataset_root_dir}")
+    quality_repos = [os.path.isfile(os.path.join(repo, "meta", "quality-selection.json"))
+                     for repo in repo_ids]
+    if any(quality_repos) and not all(quality_repos):
+        raise ValueError("Quality-indexed and unindexed LIBERO datasets must use separate roots")
     metadata_repo = next(
         (path for path in repo_ids if os.path.basename(path) == "libero_spatial_no_noops_lerobot"),
         repo_ids[0],
@@ -1265,13 +1269,50 @@ def load_libero_dataset(data_args, model_args, training_args):
 
     # Every training sample uses the image at t + chunk_size. LeRobot pads that
     # lookup at an episode boundary, so retain only starts with a real future frame.
+    quality_set = getattr(data_args, "quality_set", "auto")
+    if quality_set not in {"auto", "nominal", "recovery"}:
+        raise ValueError(f"Unknown quality_set: {quality_set}")
     valid_indices = []
     offset = 0
     for sub_dataset in dataset._datasets:
+        marker = sub_dataset.root / "meta/quality-selection.json"
+        quality_file = sub_dataset.root / "meta/quality-starts.jsonl"
+        if marker.is_file() and not quality_file.is_file():
+            raise ValueError(f"Missing quality-starts index: {quality_file}")
+        if quality_set != "auto" and not quality_file.is_file():
+            raise ValueError(f"Dataset has no quality-starts index: {sub_dataset.root}")
+        selected = None
+        if quality_file.is_file():
+            rows = [json.loads(line) for line in quality_file.read_text().splitlines() if line]
+            if marker.is_file():
+                quality_meta = json.loads(marker.read_text())
+                if len(rows) != quality_meta["training_starts"]:
+                    raise ValueError(f"Quality-starts count mismatch: {quality_file}")
+                if model_args.chunk_size != quality_meta["wla_chunk_size"]:
+                    raise ValueError("WLA chunk size differs from quality-starts selection")
+            selected = {}
+            for row in rows:
+                key = (row["episode_index"], row["frame_index"])
+                if key in selected or row["set"] not in {"nominal", "recovery"}:
+                    raise ValueError(f"Duplicate or invalid quality start: {key}")
+                selected[key] = row["set"]
         for episode in sub_dataset.meta.episodes:
             start = episode["dataset_from_index"]
             end = episode["dataset_to_index"]
-            valid_indices.extend(range(offset + start, offset + end - model_args.chunk_size))
+            episode_index = episode["episode_index"]
+            for frame_index in range(end - start - model_args.chunk_size):
+                key = (episode_index, frame_index)
+                if selected is None or (key in selected and
+                                        (quality_set == "auto" or selected[key] == quality_set)):
+                    valid_indices.append(offset + start + frame_index)
+            if selected is not None:
+                for key in [key for key in selected if key[0] == episode_index]:
+                    if not 0 <= key[1] < end - start - model_args.chunk_size:
+                        raise ValueError(f"Quality start lacks a real future frame: {key}")
+        if selected is not None:
+            episode_ids = {episode["episode_index"] for episode in sub_dataset.meta.episodes}
+            if any(key[0] not in episode_ids for key in selected):
+                raise ValueError(f"Quality start refers to a missing episode: {quality_file}")
         offset += len(sub_dataset)
     dataset = torch.utils.data.Subset(dataset, valid_indices)
 

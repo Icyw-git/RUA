@@ -1,5 +1,25 @@
 # RUA trace / feedback 数据导出
 
+## 自动质量分类与 WLA 正面样本导出
+
+已有 episode 保存后，可在 `/data1/wcz` 的独立仿真环境里一次完成回放、分类、导出。输入可以是一个 episode，也可以是包含多个 episode 的目录；输出目录需为空：
+
+```bash
+/data1/wcz/WLA/rua/scripts/offline/run_quality_pipeline.sh \
+  /data1/wcz/artifacts/rua-stage3/YOUR_EPISODE \
+  --output-root /data1/wcz/rua-dumps/YOUR_QUALITY_DUMP
+```
+
+程序逐步回放原动作并核对末端位置和官方任务结果；它记录物体位置、末端位置、夹爪接触、物体与夹爪的相对运动、物体尺寸、抽屉关节和目标条件。`quality-labels.jsonl` 把动作段标为 `nominal`（有后续子目标支持、未发现明确错误）、`recovery`（已确认错误后的纠正）、`error` 或 `uncertain`。当前只自动处理任务目标为 `On`、`In`、`Open`、`Close` 的轨迹；其他目标保存为 `unsupported/uncertain`，不会硬套抓放规则。夹爪命令变化本身不能证明抓住、抓空或掉落；只有物体水平跟着末端移动也不足以证明抓取。放手后没有明确目标达成或下落证据时，标成待定。`verification_basis` 说明标签依据，它不表示每步都是最优动作。证据不完整的段不进入正面训练起点。标签另存末端路径长度和静止步数；同一 scope、suite、task、初始状态下至少有三条其他成功轨迹时，才写相对步数和路径比值。快慢不决定入选。
+
+输出中的 `dump/rua_lerobot/` 保留获选轨迹的**完整 episode**，`dump/rua_lerobot/meta/quality-starts.jsonl` 决定 WLA 实际读取哪些起点。每条获选起点的 8 个监督动作均属于同一类已验证动作，且有真实的第 `t+8` 帧。历史前视图仍从原 episode 的 `t−8` 读取。最终失败的轨迹也会分类；只有完成了可验证局部目标的正面动作段才可能被选中。错误、待定及未选动作仍保存在原始 trace 和分类结果中。
+
+主要文件：`oracle/` 是逐步仿真证据；`quality-labels.jsonl` 是原轨迹的逐段标签；`dump/feedback.jsonl` 是每条轨迹的入选数量和拒绝原因；`dump/rua_lerobot/meta/quality-starts.jsonl` 是训练起点；`summary.json` 是本次汇总。导出结果使用 `selection_mode=quality`，与下文的旧式 `technical_success_only` 格式测试导出明确区分。
+
+训练加载器在发现 `quality-starts.jsonl` 时自动按它筛选。`quality_set=auto` 读取所有获选正面样本，也可以在训练配置里设 `quality_set=nominal` 或 `quality_set=recovery` 分别读取。数据目录指向 `YOUR_QUALITY_DUMP/dump`。当前标签器只支持 LIBERO 仿真回放中的抓取/放置与抽屉目标；缺少可重放的物理证据时保持待定，不声称能判断路径是否最优。当前规则版本为 `rules-006`；此前版本的标签与导出计数不能直接当作新版结果。
+
+下面是原有的基础导出和人工复核流程，接口继续可用。
+
 这项功能把一次完整运行的原始记录整理成两份用途不同、但可互相追溯的数据：
 
 1. `trace.jsonl` + `feedback.jsonl`：保留成功和失败轨迹，供后续 agent 分析、筛选和训练。

@@ -110,6 +110,7 @@ class DataArguments:
     primary_image_size: int = 512
     auxiliary_image_size: int = 256
     dataset_root_dir: str = "LIBERO_LeRobot"
+    quality_set: str = "auto"  # auto, nominal, or recovery for RUA quality-starts datasets
     robotwin_image_only_dataset_root_dir: Optional[str] = None
     norm_stats_path: str = "configs/norm_stats.json"
     camera_keys_path: str = "configs/robocoin_camera_keys.json"

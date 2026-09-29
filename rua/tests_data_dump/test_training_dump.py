@@ -307,7 +307,7 @@ def test_real_lerobot_roundtrip(tmp_path):
     assert tuple(sample[FRONT].shape) == (3, 3, 16, 16)
 
 
-def test_wla_train_loader_roundtrip(tmp_path):
+def test_wla_train_loader_roundtrip(tmp_path, monkeypatch):
     pytest.importorskip("lerobot.datasets.lerobot_dataset")
     wla_dataset = pytest.importorskip("dataset")
     source = make_episode(tmp_path, "episode", task_steps=20)
@@ -330,6 +330,7 @@ def test_wla_train_loader_roundtrip(tmp_path):
     assert not base[0][f"{front}_is_pad"][1]
     assert int(base[1]["episode_index"]) == 1
     assert not base[1][f"{front}_is_pad"][1]
+    monkeypatch.setattr(wla_dataset.random, "random", lambda: 1.0)
     sample = wla_dataset.LeRobotTrainDataset(
         base_dataset=base, target_transform=lambda image: image,
         primary_image_size=16, auxiliary_image_size=16,

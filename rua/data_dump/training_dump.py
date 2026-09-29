@@ -6,6 +6,7 @@ The source artifacts remain unchanged, including failed episodes and agent trace
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -56,9 +57,12 @@ def training_action(environment_action: list) -> np.ndarray:
     return action
 
 
-def episode_steps(directory: Path, result: dict, events: list[dict]) -> list[dict]:
-    if result.get("status") != "completed" or result.get("official_success") is not True:
-        raise ValueError("Only completed, officially successful episodes enter WLA training")
+def episode_steps(directory: Path, result: dict, events: list[dict],
+                  require_success: bool = True) -> list[dict]:
+    if result.get("status") != "completed":
+        raise ValueError("Only completed episodes have aligned WLA training frames")
+    if require_success and result.get("official_success") is not True:
+        raise ValueError("Only officially successful episodes enter basic WLA export")
     if result.get("uncertain_step") or result.get("cleanup_errors"):
         raise ValueError("Uncertain step or cleanup error")
     starts = {event["attempt"]: event for event in events if event["event"] == "step_started"}
@@ -243,14 +247,59 @@ def selected_ranges(review: dict | None, task_steps: int) -> list[tuple[int, int
     return selected
 
 
+def load_quality_labels(path: Path) -> dict[str, list[dict]]:
+    by_source = {}
+    for line in path.read_text().splitlines():
+        if line.strip():
+            row = json.loads(line)
+            by_source.setdefault(str(Path(row["source"]).resolve()), []).append(row)
+    return by_source
+
+
+def quality_starts(source: Path, labels: list[dict], task_steps: int,
+                   ranges: list[tuple[int, int]]) -> list[dict]:
+    """Return only starts whose eight supervised actions share a verified role."""
+    trace_hash = hashlib.sha256((source / "environment-steps.jsonl").read_bytes()).hexdigest()
+    roles = [None] * task_steps
+    versions = set()
+    oracle_hashes = set()
+    for label in labels:
+        if label["source_trace_sha256"] != trace_hash:
+            raise ValueError("Quality labels refer to a different source trace")
+        versions.add(label["labeler_version"])
+        oracle_hashes.add(label["oracle_feedback_sha256"])
+        start, end = label["task_step_range"]
+        if not (0 <= start < end <= task_steps):
+            raise ValueError("Quality label range is outside the episode")
+        for step in range(start, end):
+            if roles[step] is not None:
+                raise ValueError("Quality label ranges overlap")
+            roles[step] = (label["role"] if label["verification"] == "verified"
+                           and label["coverage"] == "complete" else "uncertain")
+    if any(role is None for role in roles) or len(versions) != 1 or len(oracle_hashes) != 1:
+        raise ValueError("Quality labels must cover the episode with one evidence version")
+    starts = []
+    for step in range(task_steps - 8):
+        role = roles[step]
+        if (role not in {"nominal", "recovery"}
+                or any(other != role for other in roles[step:step + 8])
+                or not any(start <= step and step + 8 <= end for start, end in ranges)):
+            continue
+        starts.append({"frame_index": step, "set": role,
+                       "labeler_version": next(iter(versions)),
+                       "selection_version": "positive-001"})
+    return starts
+
+
 def export(sources: list[Path], output_root: Path, dataset_name: str,
-           review: Path | None = None) -> dict:
+           review: Path | None = None, quality_labels: Path | None = None) -> dict:
     candidates = discover(sources)
     if not candidates:
         raise ValueError("No episode with result.json and environment-steps.jsonl found")
     if output_root.exists() and any(output_root.iterdir()):
         raise FileExistsError(f"Output root is not empty: {output_root}")
     approvals = load_review(review)
+    labels_by_source = load_quality_labels(quality_labels) if quality_labels else None
     accepted, feedback, episode_rows = [], [], []
     for directory in candidates:
         result = json.loads((directory / "result.json").read_text())
@@ -264,6 +313,8 @@ def export(sources: list[Path], output_root: Path, dataset_name: str,
         rejection_code = None
         rejection_reason = None
         ranges = []
+        selected_starts = []
+        quality_role_steps = {}
         stage = "legacy_source"
         try:
             if "pilot" not in result:
@@ -272,31 +323,52 @@ def export(sources: list[Path], output_root: Path, dataset_name: str,
             audit_episode(directory)
             audit_pass = True
             stage = "task_not_successful"
-            if result.get("status") != "completed" or result.get("official_success") is not True:
+            if result.get("status") != "completed" or (
+                    labels_by_source is None and result.get("official_success") is not True):
                 raise ValueError("Only completed, officially successful episodes enter WLA training")
             stage = "uncertain_execution"
             if result.get("uncertain_step") or result.get("cleanup_errors"):
                 raise ValueError("Uncertain step or cleanup error")
             stage = "training_data_invalid"
-            steps = episode_steps(directory, result, events)
+            steps = episode_steps(directory, result, events,
+                                  require_success=labels_by_source is None)
             stage = "review_rejected"
             if review_approved is False:
                 raise ValueError((review_row or {}).get("reason") or
                                  "Not approved for WLA in review file")
             stage = "invalid_review_range"
             ranges = selected_ranges(review_row, len(steps))
+            if labels_by_source is not None:
+                stage = "quality_labels_missing"
+                labels = labels_by_source.get(str(directory))
+                if not labels:
+                    raise ValueError("No quality labels for source")
+                for label in labels:
+                    quality_role_steps[label["role"]] = (quality_role_steps.get(label["role"], 0)
+                                                         + label["task_step_range"][1]
+                                                         - label["task_step_range"][0])
+                stage = "quality_labels_invalid"
+                selected_starts = quality_starts(directory, labels, len(steps), ranges)
+                if not selected_starts:
+                    stage = "quality_no_training_starts"
+                    raise ValueError("No verified eight-action training start")
             stage = "camera_incompatible"
             shape = image_shape(directory)
             if image_shape(directory, "wrist") != shape:
                 raise ValueError("Front/wrist image shapes differ")
             if accepted and shape != accepted[0][3]:
                 raise ValueError("Camera shape differs from other selected episodes")
-            accepted.extend((directory, result, steps[start:end], shape, (start, end))
-                            for start, end in ranges)
+            if labels_by_source is None:
+                accepted.extend((directory, result, steps[start:end], shape, (start, end), [])
+                                for start, end in ranges)
+            else:
+                accepted.append((directory, result, steps, shape, (0, len(steps)),
+                                 selected_starts))
         except (AssertionError, KeyError, OSError, ValueError) as exc:
             rejection_code = stage
             rejection_reason = str(exc)
-        training_starts = sum(end - start - 8 for start, end in ranges) if rejection_code is None else 0
+        training_starts = (len(selected_starts) if labels_by_source is not None else
+                           sum(end - start - 8 for start, end in ranges)) if rejection_code is None else 0
         feedback.append({
             "source": str(directory), "status": result.get("status"),
             "official_success": result.get("official_success"),
@@ -317,6 +389,14 @@ def export(sources: list[Path], output_root: Path, dataset_name: str,
             "review_approved": review_approved,
             "wla_candidate": rejection_code is None,
             "wla_training_starts": training_starts,
+            "quality_mode": labels_by_source is not None,
+            "quality_nominal_starts": sum(row["set"] == "nominal" for row in selected_starts),
+            "quality_recovery_starts": sum(row["set"] == "recovery" for row in selected_starts),
+            "quality_role_steps": quality_role_steps if labels_by_source is not None else None,
+            "quality_unselected_starts": (max(0, len(steps) - 8) - training_starts
+                                           if labels_by_source is not None and
+                                           rejection_code in {None, "quality_no_training_starts"}
+                                           else None),
             "rejection_code": rejection_code,
             "rejection_reason": rejection_reason,
         })
@@ -330,13 +410,17 @@ def export(sources: list[Path], output_root: Path, dataset_name: str,
                     ({"source": source, **{key: value for key, value in decision.items()
                                             if value is not None}}
                      for source, decision in sorted(approvals.items())))
-    manifest = {"version": 2, "dataset": dataset_name if accepted else None, "fps": FPS,
+    manifest = {"version": 3 if labels_by_source is not None else 2,
+                "dataset": dataset_name if accepted else None, "fps": FPS,
                 "state": STATE_NAMES, "action": ACTION_NAMES,
                 "wla_chunk_size": 8,
-                "selection": "audit passed; official success; aligned frames; optional reviewed task-step ranges",
+                "selection": ("verified nominal/recovery eight-action starts" if labels_by_source
+                              is not None else "audit passed; official success; aligned frames; optional reviewed task-step ranges"),
+                "selection_mode": "quality" if labels_by_source is not None else "technical_success_only",
                 "gripper_mapping": "environment -1 => training 1; environment +1 => training 0",
                 "episodes": [], "feedback_file": "feedback.jsonl", "trace_file": "trace.jsonl",
-                "review_file": "review.jsonl" if approvals is not None else None}
+                "review_file": "review.jsonl" if approvals is not None else None,
+                "quality_labels_file": "quality-labels.jsonl" if labels_by_source is not None else None}
     if accepted:
         shape = accepted[0][3]
         from lerobot.datasets.lerobot_dataset import LeRobotDataset
@@ -345,21 +429,44 @@ def export(sources: list[Path], output_root: Path, dataset_name: str,
             robot_type="libero", features=features(shape), use_videos=True, vcodec="h264",
         )
         try:
-            for directory, result, steps, _, task_step_range in accepted:
+            all_quality_starts = []
+            for directory, result, steps, _, task_step_range, starts in accepted:
                 append_episode(dataset, directory, result, steps, shape)
+                episode_index = len(manifest["episodes"])
+                all_quality_starts.extend({"episode_index": episode_index, **start}
+                                          for start in starts)
                 manifest["episodes"].append({
-                    "episode_index": len(manifest["episodes"]), "source": str(directory),
+                    "episode_index": episode_index, "source": str(directory),
                     "task_step_range": list(task_step_range),
                     "suite": result.get("pilot", {}).get("suite"),
                     "task_id": result.get("task_id"), "initial_state_id": result.get("initial_state_id"),
                     "mode": result.get("mode"), "backend": result.get("backend"),
-                    "frames": len(steps), "wla_training_starts": len(steps) - 8,
-                    "official_success": True,
+                    "frames": len(steps), "wla_training_starts": (
+                        len(starts) if labels_by_source is not None else len(steps) - 8),
+                    "official_success": result["official_success"],
                     "task_instruction": result["task_instruction"],
                     "control_tokens": sorted({step["token"] for step in steps}),
                 })
         finally:
             dataset.finalize()
+        if labels_by_source is not None:
+            meta = output_root / dataset_name / "meta"
+            meta.mkdir(parents=True, exist_ok=True)
+            write_jsonl(meta / "quality-starts.jsonl", all_quality_starts)
+            save_json(meta / "quality-selection.json", {
+                "version": 1, "selection_version": "positive-001",
+                "wla_chunk_size": 8,
+                "training_starts": len(all_quality_starts),
+            })
+            manifest["quality_starts"] = len(all_quality_starts)
+            manifest["quality_nominal_starts"] = sum(
+                row["set"] == "nominal" for row in all_quality_starts)
+            manifest["quality_recovery_starts"] = sum(
+                row["set"] == "recovery" for row in all_quality_starts)
+    if labels_by_source is not None:
+        write_jsonl(output_root / "quality-labels.jsonl",
+                    (row for source in sorted(labels_by_source)
+                     for row in labels_by_source[source]))
     save_json(output_root / "dump-manifest.json", manifest)
     return manifest
 
@@ -371,8 +478,11 @@ def main() -> int:
     parser.add_argument("--dataset-name", default="rua_lerobot")
     parser.add_argument("--review", type=Path,
                         help="JSONL source + approved_for_wla + optional task_step_ranges")
+    parser.add_argument("--quality-labels", type=Path,
+                        help="Verified replay labels; export full episodes and selected WLA starts")
     args = parser.parse_args()
-    report = export(args.sources, args.output_root, args.dataset_name, args.review)
+    report = export(args.sources, args.output_root, args.dataset_name,
+                    args.review, args.quality_labels)
     print(json.dumps({"output": str(args.output_root), "episodes": len(report["episodes"]),
                       "feedback": str(args.output_root / "feedback.jsonl")}, indent=2))
     return 0
