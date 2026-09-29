@@ -5,7 +5,7 @@ from collections import Counter
 from math import dist
 
 
-VERSION = "signals-001"
+VERSION = "signals-002"
 
 
 def approach_motion(rows: list[dict], targets: set[str], radius: float) -> dict | None:
@@ -57,15 +57,15 @@ def behavior_signals(labels: list[dict], radii: dict[str, float],
                                      "reference_count": efficiency["reference_count"]},
                         "version": VERSION})
     source = labels[0]["source"]
-    attempts = []
+    cycles = []
     for event in sorted((event for label in labels for event in label["events"]),
                         key=lambda event: event["task_step"]):
         if event["event"] in {"target_grasped", "goal_gained"}:
-            signals.extend(_repeated_attempts(source, attempts))
-            attempts = []
+            signals.extend(_repeated_gripper_cycles(source, cycles))
+            cycles = []
         elif event["event"] in {"gripper_cycle_unresolved", "grasp_missed"}:
-            attempts.append(event["task_step"])
-    signals.extend(_repeated_attempts(source, attempts))
+            cycles.append(event["task_step"])
+    signals.extend(_repeated_gripper_cycles(source, cycles))
     return sorted(signals, key=lambda row: (row["source"], row["task_step_range"], row["kind"]))
 
 
@@ -95,14 +95,15 @@ def _signal(label: dict, kind: str, evidence: dict) -> dict:
             "evidence": evidence, "version": VERSION}
 
 
-def _repeated_attempts(source: str, attempts: list[int]) -> list[dict]:
+def _repeated_gripper_cycles(source: str, cycles: list[int]) -> list[dict]:
+    """Group cycle-end events; their span is not a verified retry or training segment."""
     groups = []
-    for step in attempts:
+    for step in cycles:
         if not groups or step - groups[-1][-1] > 40:
             groups.append([])
         groups[-1].append(step)
     return [{"source": source, "task_step_range": [group[0], group[-1] + 1],
-             "kind": "repeated_attempt", "status": "candidate",
-             "evidence": {"event_steps": group, "attempt_count": len(group)},
+             "kind": "repeated_gripper_cycle", "status": "candidate",
+             "evidence": {"event_steps": group, "cycle_count": len(group)},
              "version": VERSION}
             for group in groups if len(group) >= 2]

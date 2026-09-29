@@ -21,7 +21,7 @@
 
 `events` 描述发生了什么，`role` 描述这一段对当前任务的作用。例如双物体任务中“放下第一件物体后再次闭合夹爪”可以是正常切换；它不自动成为 `grasp_missed`。一个最终失败的 episode 也可能包含 `nominal` 动作段。`error` 不能仅从最终失败倒推。一个区间若跨越错误、恢复或任务阶段边界，就先拆成多个区间；不能给混合区间贴一个有利标签。
 
-`verified nominal` 表示该阶段必需的状态逐步可观测、最终完成可验证的子目标，且这段没有已证实的错误；它不宣称路径最短或每一步最优。`verified recovery` 另要求能定位先前的错误及随后纠正的起点。证据要求按任务阶段确定：抓取需要目标物体与夹爪关系，放置需要物体与容器/区域关系，抽屉需要目标关节位置。`coverage=complete` 只指该区间判定所必需的量齐全，不要求收集无关的全部仿真状态。若某个任务没有足够的子目标证据，就保持 `candidate`，不为了提高入选率而把“没发现错误”升级为 `verified`。
+`verified nominal` 表示必需状态可观测、有后续成功或抓取等进展证据支持，且未被当前规则判为错误或待定。当前实现会先用后续进展支持之前的动作，再排除检测到的问题，因此不能解释为逐步确认了动作优质、高效或最优。`verified recovery` 另要求能定位先前的错误及随后纠正的起点。证据要求按任务阶段确定：抓取需要目标物体与夹爪关系，放置需要物体与容器/区域关系，抽屉需要目标关节位置。`coverage=complete` 只指该区间判定所必需的量齐全，不要求收集无关的全部仿真状态。若某个任务没有足够的子目标证据，就保持 `candidate`，不为了提高入选率而把“没发现错误”升级为 `verified`。
 
 ### 任务相关的判定规则
 
@@ -43,7 +43,7 @@
 
 这个示例只说明字段，不是对真实轨迹的判定。区间 `[65,83)` 只包含任务动作 65 至 82。`verification=candidate` 的段不会进入 WLA 训练；`coverage=complete` 也不能把候选事件升级为已确认。`source_trace_sha256` 和 `oracle_feedback_sha256` 绑定两份证据。训练用途不写进事实标签，另由明确版本的选择规则生成训练起点。
 
-`behavior-signals.jsonl` 另存 `slow_relative`、`inefficient_motion`、`repeated_attempt` 候选区间，含 `source`、`task_step_range`、`kind`、`status=candidate`、`evidence`、`version`。其中慢速只与同任务、同扰动且至少五条参考成功轨迹比较；绕行线索仅在正面动作段计算，跟踪同一目标物体的末端路程、距离回退和净进展，双物体任务不逐帧切换最近物体；反复尝试线索来自局部连续的未解决夹爪周期或抓空事件，相邻事件超过 40 步时拆开。它们都不能单独证明动作错误。`review-starts.jsonl` 只列这些信号覆盖的、已经实际导出的八步训练起点，供后续查看；当前不自动删除或改变 `nominal/recovery` 标签。
+`behavior-signals.jsonl` 另存 `slow_relative`、`inefficient_motion`、`repeated_gripper_cycle` 候选区间，含 `source`、`task_step_range`、`kind`、`status=candidate`、`evidence`、`version`。其中慢速只与同任务、同扰动且至少五条参考成功轨迹比较；绕行线索仅在正面动作段计算，跟踪同一目标物体的末端路程、距离回退和净进展，双物体任务不逐帧切换最近物体；重复夹爪周期线索来自未解决夹爪周期或抓空事件，`evidence.cycle_count` 统计这些周期结束事件，不代表有效尝试次数。相邻事件超过 40 步时拆开，但连续事件仍可能串成长段，所以范围仅用于定位证据，不能作为训练片段边界。当前信号版本为 `signals-002`。它们都不能单独证明动作错误。`review-starts.jsonl` 只列这些信号覆盖的、已经实际导出的八步训练起点，供后续查看；当前不自动删除或改变 `nominal/recovery` 标签。
 
 ## 不依赖人工标注，提高分类准确性
 

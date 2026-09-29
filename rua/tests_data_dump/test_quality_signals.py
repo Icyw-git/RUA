@@ -35,18 +35,21 @@ def test_behavior_signals_are_candidates_and_only_review_exported_starts():
     }]
     signals = behavior_signals(labels, {"bowl": 0.04}, {"bowl"})
     assert {row["kind"] for row in signals} == {
-        "inefficient_motion", "repeated_attempt", "slow_relative"}
+        "inefficient_motion", "repeated_gripper_cycle", "slow_relative"}
     assert all(row["status"] == "candidate" for row in signals)
+    cycle = next(row for row in signals if row["kind"] == "repeated_gripper_cycle")
+    assert cycle["version"] == "signals-002"
+    assert cycle["evidence"] == {"event_steps": [3, 7], "cycle_count": 2}
     starts = [{"frame_index": 0, "set": "nominal"},
               {"frame_index": 8, "set": "nominal"}]
     review = review_starts(starts, signals, source)
     assert len(review) == 2
-    assert "repeated_attempt" in review[0]["reasons"]
-    assert "repeated_attempt" not in review[1]["reasons"]
+    assert "repeated_gripper_cycle" in review[0]["reasons"]
+    assert "repeated_gripper_cycle" not in review[1]["reasons"]
     assert labels[0]["role"] == "nominal"
 
 
-def test_attempt_counter_resets_after_verified_progress():
+def test_cycle_counter_resets_after_verified_progress():
     label = {"source": "/episode", "task_step_range": [0, 20],
              "role": "uncertain", "efficiency": {"reference_count": 0},
              "events": [
@@ -66,7 +69,7 @@ def test_uncertain_motion_is_not_called_inefficient():
     assert not behavior_signals([label], {"bowl": 0.04}, {"bowl"})
 
 
-def test_distant_attempts_do_not_make_one_long_review_interval():
+def test_distant_cycles_do_not_make_one_long_review_interval():
     label = {"source": "/episode", "task_step_range": [0, 200],
              "role": "uncertain", "efficiency": {"reference_count": 0},
              "events": [{"event": "gripper_cycle_unresolved", "task_step": step}

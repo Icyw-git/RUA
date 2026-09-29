@@ -1,6 +1,8 @@
 # RUA trace / feedback 数据导出
 
-## 自动质量分类与 WLA 正面样本导出
+## 推荐入口：自动质量分类与 WLA 正面样本导出
+
+新数据统一使用下面的质量流程。下文基础导出和人工复核仅用于格式检查或已有审核任务，无需再串联运行。
 
 已有 episode 保存后，可在 `/data1/wcz` 的独立仿真环境里一次完成回放、分类、导出。输入可以是一个 episode，也可以是包含多个 episode 的目录；输出目录需为空：
 
@@ -12,11 +14,15 @@
 
 程序逐步回放原动作并核对末端位置和官方任务结果；它记录物体位置、末端位置、夹爪接触、物体与夹爪的相对运动、物体尺寸、抽屉关节和目标条件。`quality-labels.jsonl` 把动作段标为 `nominal`（有后续子目标支持、未发现明确错误）、`recovery`（已确认错误后的纠正）、`error` 或 `uncertain`。`task_phase` 是辅助诊断，可能为空，不参与训练筛选。`verification` 记录证据是否确认，`coverage` 记录所需状态是否齐全。当前只自动处理任务目标为 `On`、`In`、`Open`、`Close` 的轨迹；其他目标保存为 `unsupported/uncertain`。夹爪命令变化本身不能证明抓住、抓空或掉落；只有物体水平跟着末端移动也不足以证明抓取。放手后没有明确目标达成或下落证据时，标成待定。证据不完整的段不进入正面训练起点。标签另存末端路径长度和静止步数；同一 scope、suite、task、初始状态下至少有三条其他成功轨迹时，才写相对步数和路径比值。快慢不决定入选。
 
+`nominal + verified` 表示有后续成功或抓取等进展证据支持，且未被当前规则判为错误或待定；它不表示逐步确认了动作高效、最优或适合所有任务。`recovery + verified` 还要求先前错误和后续纠正的证据。
+
 输出中的 `dump/rua_lerobot/` 保留获选轨迹的**完整 episode**，`dump/rua_lerobot/meta/quality-starts.jsonl` 决定 WLA 实际读取哪些起点。每条获选起点的 8 个监督动作均属于同一类已验证动作，且有真实的第 `t+8` 帧。历史前视图仍从原 episode 的 `t−8` 读取。最终失败的轨迹也会分类；只有完成了可验证局部目标的正面动作段才可能被选中。错误、待定及未选动作仍保存在原始 trace 和分类结果中。
 
-主要文件：`oracle/` 是逐步仿真证据；`quality-labels.jsonl` 是原轨迹的逐段标签；`behavior-signals.jsonl` 是慢速、绕行或反复尝试的候选区间及证据；`review-starts.jsonl` 列出这些候选区间覆盖的已导出训练起点；`dump/feedback.jsonl` 是每条轨迹的入选数量和拒绝原因；`dump/rua_lerobot/meta/quality-starts.jsonl` 是训练起点；`summary.json` 是本次汇总。行为信号目前是影子分析，不改变训练起点。导出结果使用 `selection_mode=quality`，与下文的旧式 `technical_success_only` 格式测试导出明确区分。
+主要文件：`oracle/` 是逐步仿真证据；`quality-labels.jsonl` 是原轨迹的逐段标签；`behavior-signals.jsonl` 是慢速、绕行或重复夹爪周期的候选区间及证据；`review-starts.jsonl` 列出这些候选区间覆盖的已导出训练起点；`dump/feedback.jsonl` 是每条轨迹的入选数量和拒绝原因；`dump/rua_lerobot/meta/quality-starts.jsonl` 是训练起点；`summary.json` 是本次汇总。行为信号目前是影子分析，不改变训练起点。导出结果使用 `selection_mode=quality`，与下文的旧式 `technical_success_only` 格式测试导出明确区分。
 
 训练加载器在发现 `quality-starts.jsonl` 时自动按它筛选。`quality_set=auto` 读取所有获选正面样本，也可以在训练配置里设 `quality_set=nominal` 或 `quality_set=recovery` 分别读取。数据目录指向 `YOUR_QUALITY_DUMP/dump`。当前标签器只支持 LIBERO 仿真回放中的抓取/放置与抽屉目标；缺少可重放的物理证据时保持待定，不声称能判断路径是否最优。当前规则版本为 `rules-007`；此前版本的标签与导出计数不能直接当作新版结果。
+
+夹爪候选使用 `repeated_gripper_cycle`，`evidence.cycle_count` 统计夹爪周期结束事件，不等于目标抓取尝试次数。`task_step_range` 只覆盖这些事件所在范围，可能包含中间调整动作，不能直接用作训练片段边界。信号版本为 `signals-002`；历史 `signals-001` 产物保留原字段，重新运行流程会生成新字段，不同时输出两套名称。
 
 下面是原有的基础导出和人工复核流程，接口继续可用。
 
@@ -27,7 +33,7 @@
 
 RUA 运行时自动保存 `result.json`、`environment-steps.jsonl`、`front-control.mp4`、`wrist-control.mp4`，以及存在时的 `requests/`、`native/`。目前**不会自动运行**本页的质量筛选、人工复核或 LeRobot 导出；这些步骤由操作者在 episode 完成后手动启动。导出是离线操作，不调用模型、不执行环境动作。原始目录要保留：`trace.jsonl` 中的图片路径指向原始目录，不复制 PNG。生成的 LeRobot 视频则在新数据集内，可单独搬运。
 
-## 运行
+## 基础导出（兼容入口）
 
 ```bash
 cd /data1/wcz/WLA
@@ -39,7 +45,7 @@ PYTHONPATH=/data1/wcz/WLA/rua/scripts:/data1/wcz/WLA/rua/vendor/show_harness:/da
 
 输入可以是单个 episode 目录或其上级运行目录，也可以传多个目录。输出目录须为空或尚不存在。`rua-data` 是 `/data1/wcz` 下单独的 Conda 环境；导出不会改共享服务或别人的 Python 环境。
 
-## 质量筛选与人工复核
+## 人工复核（兼容入口）
 
 先对原始运行目录生成待复核建议：
 
