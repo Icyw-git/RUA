@@ -12,11 +12,11 @@
 
 | 轴 | 字段 | 值 | 判定依据 |
 | --- | --- | --- | --- |
-| 任务阶段 | `phase` | `approach`、`grasp`、`transport`、`place`、`articulate`、`verify`、`unknown` | 任务目标与已验证的物体、末端、关节事件；阶段边界不清时为 `unknown` |
+| 任务阶段（辅助） | `task_phase` | `approach`、`transport`、`place`、`articulate`、`unknown`、`null` | 只描述能识别的任务阶段；边界不清时为空，不参与训练筛选 |
 | 可观察事件 | `events` | `target_grasped`、`grasp_missed`、`gripper_cycle_unresolved`、`wrong_object_grasped`、`target_dropped`、`target_release_unresolved`、`goal_gained`、`goal_lost`、`wrong_drawer_moved` | 回放后的物理状态和目标条件；每个事件单独保存动作编号和证据，空列表表示没有确认事件 |
 | 行为角色 | `role` | `nominal`、`recovery`、`error`、`uncertain` | 事件发生前后的局部任务状态；`recovery` 必须有先前偏差及后续有效纠正 |
 | 证据等级 | `verification` | `verified`、`candidate`、`unknown` | `verified` 要有可重放的物理或目标条件证据；动作形状、速度、夹爪命令只产生 `candidate` |
-| 可观测范围 | `coverage` | `complete`、`partial`、`none` | 只表示本任务所需的物体、接触或关节状态是否逐步可用；不能用“没检测到错误”代替 `complete` |
+| 可观测范围 | `coverage` | `complete`、`partial` | 只表示本任务所需的物体、接触或关节状态是否逐步可用；不能用“没检测到错误”代替 `complete` |
 | 效率描述 | `speed_ratio`、`path_ratio`、`stationary_steps` | 数值或 `null` | 与同任务、同扰动、相近初始难度的成功轨迹相比；参考不足时为空 |
 
 `events` 描述发生了什么，`role` 描述这一段对当前任务的作用。例如双物体任务中“放下第一件物体后再次闭合夹爪”可以是正常切换；它不自动成为 `grasp_missed`。一个最终失败的 episode 也可能包含 `nominal` 动作段。`error` 不能仅从最终失败倒推。一个区间若跨越错误、恢复或任务阶段边界，就先拆成多个区间；不能给混合区间贴一个有利标签。
@@ -38,10 +38,12 @@
 每个连续区间一行，保存在 dump 的 `quality-labels.jsonl`；证据值可以指向对应 `oracle-feedback.jsonl` 步数，不复制视频。示意：
 
 ```json
-{"version":1,"labeler_version":"rules-001","source":"/absolute/episode","source_trace_sha256":"...","oracle_feedback_sha256":"...","task_step_range":[65,83],"phase":"grasp","events":[],"preceded_by":{"task_step":64,"event":"grasp_missed","verification":"candidate"},"role":"recovery","verification":"candidate","coverage":"partial","coverage_fields":{"target_pose":true,"gripper_contact":false,"goal_predicate":true},"evidence":[{"task_step":64,"kind":"gripper_command_changed"},{"task_step":82,"kind":"target_motion_resumed"}],"efficiency":{"speed_ratio":null,"path_ratio":null,"stationary_steps":null,"reference_count":0}}
+{"version":2,"labeler_version":"rules-007","source":"/absolute/episode","source_trace_sha256":"...","oracle_feedback_sha256":"...","task_step_range":[65,83],"task_phase":"approach","role":"uncertain","verification":"candidate","coverage":"complete","events":[{"task_step":70,"event":"gripper_cycle_unresolved","verification":"candidate","evidence":"gripper_command+object_motion+eef_retreat"}],"efficiency":{"eef_path_m":0.12,"stationary_steps":2,"speed_ratio":null,"path_ratio":null,"reference_count":0}}
 ```
 
-这个示例只是接口，不是对现有 `object_object` 轨迹第 64 步的事实判定。区间 `[65,83)` 只包含任务动作 65 至 82；前面的疑似错误仅作为关联上下文，不把错误动作放进恢复区间。由于前面的错误也只是候选，该恢复段不能升级为 `verified`。已验证的事件应写成带 `task_step`、`event`、`evidence` 的对象；`source_trace_sha256` 和 `oracle_feedback_sha256` 绑定两份证据。训练用途不写进事实标签，另由明确版本的选择规则生成训练起点，避免“标签＝批准训练”混在一起。
+这个示例只说明字段，不是对真实轨迹的判定。区间 `[65,83)` 只包含任务动作 65 至 82。`verification=candidate` 的段不会进入 WLA 训练；`coverage=complete` 也不能把候选事件升级为已确认。`source_trace_sha256` 和 `oracle_feedback_sha256` 绑定两份证据。训练用途不写进事实标签，另由明确版本的选择规则生成训练起点。
+
+`behavior-signals.jsonl` 另存 `slow_relative`、`inefficient_motion`、`repeated_attempt` 候选区间，含 `source`、`task_step_range`、`kind`、`status=candidate`、`evidence`、`version`。其中慢速只与同任务、同扰动且至少五条参考成功轨迹比较；绕行线索仅在正面动作段计算，跟踪同一目标物体的末端路程、距离回退和净进展，双物体任务不逐帧切换最近物体；反复尝试线索来自局部连续的未解决夹爪周期或抓空事件，相邻事件超过 40 步时拆开。它们都不能单独证明动作错误。`review-starts.jsonl` 只列这些信号覆盖的、已经实际导出的八步训练起点，供后续查看；当前不自动删除或改变 `nominal/recovery` 标签。
 
 ## 不依赖人工标注，提高分类准确性
 

@@ -10,6 +10,7 @@ from statistics import median
 from libero_harness.paths import save_json
 from .oracle_feedback import replay
 from .quality_labels import classify
+from .quality_signals import behavior_signals, review_starts, signal_counts
 from .training_dump import discover, export, write_jsonl
 
 
@@ -43,9 +44,10 @@ def run(sources: list[Path], output_root: Path, dataset_name: str = "rua_lerobot
     oracle_root.mkdir()
     labels = []
     episode_metrics = []
+    oracle_reports = {}
     for index, source in enumerate(episodes):
         oracle_dir = oracle_root / f"{index:04d}"
-        replay(source, oracle_dir)
+        oracle_reports[str(source)] = replay(source, oracle_dir)
         labels.extend(classify(source, oracle_dir))
         rows = [json.loads(line) for line in
                 (oracle_dir / "oracle-feedback.jsonl").read_text().splitlines()]
@@ -59,15 +61,37 @@ def run(sources: list[Path], output_root: Path, dataset_name: str = "rua_lerobot
             "eef_path_m": sum(dist(a, b) for a, b in zip(positions, positions[1:])),
         })
     annotate_efficiency(labels, episode_metrics)
+    signals = []
+    for source in episodes:
+        source_labels = [label for label in labels if label["source"] == str(source)]
+        report = oracle_reports[str(source)]
+        source_signals = behavior_signals(
+            source_labels, report["object_horizontal_radius_m"],
+            set(report["target_objects"]))
+        signals.extend(source_signals)
     label_path = output_root / "quality-labels.jsonl"
     write_jsonl(label_path, labels)
+    write_jsonl(output_root / "behavior-signals.jsonl", signals)
     manifest = export(episodes, output_root / "dump", dataset_name,
                       quality_labels=label_path)
+    review = []
+    if manifest["episodes"]:
+        index_path = output_root / "dump" / dataset_name / "meta/quality-starts.jsonl"
+        starts = [json.loads(line) for line in index_path.read_text().splitlines()]
+        for episode in manifest["episodes"]:
+            source = episode["source"]
+            episode_starts = [start for start in starts
+                              if start["episode_index"] == episode["episode_index"]]
+            review.extend(review_starts(episode_starts, signals, source))
+    write_jsonl(output_root / "review-starts.jsonl", review)
     summary = {"sources": len(episodes), "segments": len(labels),
                "exported_episodes": len(manifest["episodes"]),
                "training_starts": manifest.get("quality_starts", 0),
                "nominal_starts": manifest.get("quality_nominal_starts", 0),
                "recovery_starts": manifest.get("quality_recovery_starts", 0),
+               "review_starts": len(review),
+               "behavior_signal_counts": signal_counts(signals),
+               "signal_mode": "shadow",
                "dump": str(output_root / "dump")}
     save_json(output_root / "summary.json", summary)
     return summary

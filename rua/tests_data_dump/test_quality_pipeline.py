@@ -167,7 +167,7 @@ def test_normal_two_object_switch_is_not_a_drop(tmp_path):
     assert not any(event["event"] == "target_dropped"
                    for label in labels for event in label["events"])
     assert not any(label["role"] == "error" for label in labels)
-    assert any(label["phase"] == "approach" and
+    assert any(label["task_phase"] == "approach" and
                label["task_step_range"][0] <= 13 < label["task_step_range"][1]
                for label in labels)
 

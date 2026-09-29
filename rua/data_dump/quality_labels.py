@@ -13,9 +13,10 @@ from pathlib import Path
 import numpy as np
 
 from .training_dump import write_jsonl
+from .quality_signals import approach_motion
 
 
-VERSION = "rules-006"
+VERSION = "rules-007"
 
 
 def _carried(rows: list[dict], name: str, radius: float) -> list[bool]:
@@ -70,11 +71,11 @@ def _predicates_met(row: dict) -> bool:
 def _segments(steps: list[dict]) -> list[dict]:
     segments = []
     for step in steps:
-        key = (step["phase"], step["role"], step["verification"])
+        key = (step["task_phase"], step["role"], step["verification"])
         if not segments or segments[-1]["_key"] != key:
             segments.append({"_key": key, "task_step_range": [step["task_step"],
                                                        step["task_step"] + 1],
-                             "phase": step["phase"], "role": step["role"],
+                             "task_phase": step["task_phase"], "role": step["role"],
                              "verification": step["verification"], "events": []})
         else:
             segments[-1]["task_step_range"][1] += 1
@@ -119,12 +120,13 @@ def classify(source: Path, oracle_dir: Path) -> list[dict]:
             covered &= len(matches) == 1
             target_joints.update(matches)
 
-    steps = [{"task_step": i, "phase": "articulate" if articulated else
+    steps = [{"task_step": i, "task_phase": "articulate" if articulated else
               "approach" if placement else "unknown",
               "role": "uncertain", "verification": "unknown", "events": []}
              for i in range(len(rows))]
     if not covered:
-        return _finish(source, trace_hash, oracle_file, rows, steps, required, covered, family)
+        return _finish(source, trace_hash, oracle_file, rows, steps,
+                       covered, family, targets, report.get("object_horizontal_radius_m", {}))
 
     goal = [_predicates_met(row) for row in rows]
     target_grasp = [False] * len(rows)
@@ -229,7 +231,7 @@ def classify(source: Path, oracle_dir: Path) -> list[dict]:
         for i, step in enumerate(steps):
             if target_grasp[i]:
                 last_held = next(name for name, mask in target_by_name.items() if mask[i])
-                step["phase"] = "transport"
+                step["task_phase"] = "transport"
             elif last_held is not None:
                 placed_soon = any(any(item["satisfied"] and
                                       item.get("objects", [])[:1] == [last_held]
@@ -237,14 +239,14 @@ def classify(source: Path, oracle_dir: Path) -> list[dict]:
                                   for future in rows[i:i + 4])
                 if len(targets) == 1:
                     placed_soon |= any(goal[i:i + 4])
-                step["phase"] = "place" if placed_soon else "grasp"
+                step["task_phase"] = "place" if placed_soon else None
                 placed_now = any(item["satisfied"] and
                                  item.get("objects", [])[:1] == [last_held]
                                  for item in rows[i]["goal_predicates"])
                 if placed_now or (len(targets) == 1 and goal[i]):
                     last_held = None
             elif goal[i]:
-                step["phase"] = "place"
+                step["task_phase"] = "place"
 
         # Closing and reopening without any verified grasp is ambiguous: a
         # candidate missed grasp, never a verified error or recovery.
@@ -327,12 +329,13 @@ def classify(source: Path, oracle_dir: Path) -> list[dict]:
         for step in steps[min(unresolved) + 1:]:
             if step["role"] != "error":
                 step["role"], step["verification"] = "uncertain", "unknown"
-    return _finish(source, trace_hash, oracle_file, rows, steps, required, covered, family)
+    return _finish(source, trace_hash, oracle_file, rows, steps,
+                   covered, family, targets, report.get("object_horizontal_radius_m", {}))
 
 
 def _finish(source: Path, trace_hash: str, oracle_file: Path, rows: list[dict],
-            steps: list[dict], required: tuple[str, ...], covered: bool,
-            family: str) -> list[dict]:
+            steps: list[dict], covered: bool,
+            family: str, targets: set[str], radii: dict[str, float]) -> list[dict]:
     oracle_hash = hashlib.sha256(oracle_file.read_bytes()).hexdigest()
     segments = _segments(steps)
     for segment in segments:
@@ -346,24 +349,21 @@ def _finish(source: Path, trace_hash: str, oracle_file: Path, rows: list[dict],
             stationary = sum(distance < 0.002 for distance in movements)
         else:
             path_m, stationary = None, None
-        basis = {
-            "nominal": "later_subgoal_reached_without_detected_error",
-            "recovery": "confirmed_error_followed_by_correction",
-            "error": "observed_physical_error",
-            "uncertain": "insufficient_evidence",
-        }[segment["role"]]
-        segment.update({"version": 1, "labeler_version": VERSION,
+        segment.update({"version": 2, "labeler_version": VERSION,
                         "task_family": family,
-                        "verification_basis": basis,
                         "source": str(source), "source_trace_sha256": trace_hash,
                         "oracle_feedback_sha256": oracle_hash,
                         "coverage": "complete" if covered else "partial",
-                        "coverage_fields": {field: all(field in row for row in rows)
-                                            for field in required},
                         "efficiency": {"eef_path_m": path_m,
                                        "stationary_steps": stationary,
                                        "speed_ratio": None, "path_ratio": None,
                                        "reference_count": 0}})
+        if covered and segment["task_phase"] == "approach":
+            radius = max((float(radii.get(name, 0.04)) for name in targets),
+                         default=0.04)
+            motion = approach_motion(rows[start:end], targets, radius)
+            if motion is not None:
+                segment["efficiency"]["approach_motion"] = motion
     return segments
 
 
