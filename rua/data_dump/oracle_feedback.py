@@ -27,6 +27,9 @@ def replay(source: Path, output: Path) -> dict:
         raise ValueError("Only completed episodes with certain actions can be replayed")
     if output.exists() and any(output.iterdir()):
         raise FileExistsError(f"Output directory is not empty: {output}")
+    for name in ("task.bddl", "initial_state.npy"):
+        if not (source / name).is_file():
+            raise FileNotFoundError(f"Missing replay input: {source / name}")
 
     from libero.envs import OffScreenRenderEnv
 

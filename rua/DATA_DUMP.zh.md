@@ -20,7 +20,9 @@
 
 主要文件：`oracle/` 是逐步仿真证据；`quality-labels.jsonl` 是原轨迹的逐段标签；`behavior-signals.jsonl` 是慢速、绕行或重复夹爪周期的候选区间及证据；`review-starts.jsonl` 列出这些候选区间覆盖的已导出训练起点；`dump/feedback.jsonl` 是每条轨迹的入选数量和拒绝原因；`dump/rua_lerobot/meta/quality-starts.jsonl` 是训练起点；`summary.json` 是本次汇总。行为信号目前是影子分析，不改变训练起点。导出结果使用 `selection_mode=quality`，与下文的旧式 `technical_success_only` 格式测试导出明确区分。
 
-训练加载器在发现 `quality-starts.jsonl` 时自动按它筛选。`quality_set=auto` 读取所有获选正面样本，也可以在训练配置里设 `quality_set=nominal` 或 `quality_set=recovery` 分别读取。数据目录指向 `YOUR_QUALITY_DUMP/dump`。当前标签器只支持 LIBERO 仿真回放中的抓取/放置与抽屉目标；缺少可重放的物理证据时保持待定，不声称能判断路径是否最优。当前规则版本为 `rules-007`；此前版本的标签与导出计数不能直接当作新版结果。
+批量处理时，单条输入、回放或分类失败会在 `dump/feedback.jsonl` 中记录 `source_invalid`、`replay_failed` 或 `classification_failed`，其余来源继续执行。`summary.json` 的 `preprocessing_failed_sources` 统计这些失败，`rejected_sources` 统计最终未导出的来源总数。拒绝来源的最终训练起点及两类起点计数均为零。正常完成退出码为 `0`（包括正常筛选后全部不入选）；有预处理失败则完成剩余导出后返回 `2`。依赖、系统或程序故障仍中止。全部拒绝时保留反馈和零计数 manifest，不创建空数据集。
+
+训练加载器在发现 `quality-starts.jsonl` 时自动按它筛选。`quality_set=auto` 读取所有获选正面样本，也可以在训练配置里设 `quality_set=nominal` 或 `quality_set=recovery` 分别读取。数据目录指向 `YOUR_QUALITY_DUMP/dump`。当前标签器只支持 LIBERO 仿真回放中的抓取/放置与抽屉目标；缺少可重放的物理证据时保持待定，不声称能判断路径是否最优。当前规则版本为 `rules-008`；此前版本的标签与导出计数不能直接当作新版结果。
 
 夹爪候选使用 `repeated_gripper_cycle`，`evidence.cycle_count` 统计夹爪周期结束事件，不等于目标抓取尝试次数。`task_step_range` 只覆盖这些事件所在范围，可能包含中间调整动作，不能直接用作训练片段边界。信号版本为 `signals-002`；历史 `signals-001` 产物保留原字段，重新运行流程会生成新字段，不同时输出两套名称。
 

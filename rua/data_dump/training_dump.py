@@ -138,15 +138,51 @@ def append_episode(dataset, directory: Path, result: dict, steps: list[dict], sh
         wrist.close()
 
 
-def discover(sources: list[Path]) -> list[Path]:
+def discover(sources: list[Path], *, include_incomplete: bool = False) -> list[Path]:
     found = set()
     for source in sources:
+        if include_incomplete:
+            markers = ("result.json", "environment-steps.jsonl")
+            if not source.exists() or any((source / name).is_file() for name in markers):
+                found.add(source.resolve())
+            else:
+                found.update(path.parent.resolve() for name in markers
+                             for path in source.rglob(name))
+            continue
         if (source / "result.json").is_file() and (source / "environment-steps.jsonl").is_file():
             found.add(source.resolve())
         else:
             found.update(path.parent.resolve() for path in source.rglob("result.json")
                          if (path.parent / "environment-steps.jsonl").is_file())
     return sorted(found)
+
+
+def read_source(directory: Path) -> tuple[dict, list[dict], str | None]:
+    """Read each input independently so valid trace survives a broken result."""
+    result, events, errors = {}, [], []
+    try:
+        value = json.loads((directory / "result.json").read_text())
+        if not isinstance(value, dict) or not isinstance(value.get("pilot", {}), dict):
+            raise ValueError("result.json must contain an object with an object-valued pilot")
+        result = value
+    except (FileNotFoundError, ValueError) as exc:
+        errors.append(f"result.json: {exc}")
+    try:
+        lines = (directory / "environment-steps.jsonl").read_text().splitlines()
+    except (FileNotFoundError, ValueError) as exc:
+        errors.append(f"environment-steps.jsonl: {exc}")
+        lines = []
+    for number, line in enumerate(lines, 1):
+        if not line.strip():
+            continue
+        try:
+            value = json.loads(line)
+            if not isinstance(value, dict):
+                raise ValueError("Trace row must be an object")
+            events.append(value)
+        except ValueError as exc:
+            errors.append(f"environment-steps.jsonl line {number}: {exc}")
+    return result, events, "; ".join(errors) if errors else None
 
 
 def write_jsonl(path: Path, records) -> None:
@@ -292,8 +328,10 @@ def quality_starts(source: Path, labels: list[dict], task_steps: int,
 
 
 def export(sources: list[Path], output_root: Path, dataset_name: str,
-           review: Path | None = None, quality_labels: Path | None = None) -> dict:
-    candidates = discover(sources)
+           review: Path | None = None, quality_labels: Path | None = None,
+           source_failures: dict[str, dict] | None = None) -> dict:
+    source_failures = source_failures or {}
+    candidates = sorted(set(discover(sources)) | {Path(source) for source in source_failures})
     if not candidates:
         raise ValueError("No episode with result.json and environment-steps.jsonl found")
     if output_root.exists() and any(output_root.iterdir()):
@@ -302,10 +340,7 @@ def export(sources: list[Path], output_root: Path, dataset_name: str,
     labels_by_source = load_quality_labels(quality_labels) if quality_labels else None
     accepted, feedback, episode_rows = [], [], []
     for directory in candidates:
-        result = json.loads((directory / "result.json").read_text())
-        events = [json.loads(line) for line in
-                  (directory / "environment-steps.jsonl").read_text().splitlines()]
-        episode_rows.append((directory, events))
+        result, events, read_error = read_source(directory)
         review_row = approvals.get(str(directory)) if approvals is not None else None
         review_approved = (None if approvals is None else
                            bool(review_row and review_row["approved_for_wla"]))
@@ -315,8 +350,18 @@ def export(sources: list[Path], output_root: Path, dataset_name: str,
         ranges = []
         selected_starts = []
         quality_role_steps = {}
-        stage = "legacy_source"
+        stage = "trace_invalid"
+        records = []
         try:
+            records.extend(trace_records(directory, events))
+            failure = source_failures.get(str(directory))
+            if failure:
+                stage = failure["rejection_code"]
+                raise ValueError(failure["rejection_reason"])
+            stage = "source_invalid"
+            if read_error:
+                raise ValueError(read_error)
+            stage = "legacy_source"
             if "pilot" not in result:
                 raise ValueError("Legacy rollout schema; no RUA pre-action frame alignment")
             stage = "audit_failed"
@@ -364,9 +409,12 @@ def export(sources: list[Path], output_root: Path, dataset_name: str,
             else:
                 accepted.append((directory, result, steps, shape, (0, len(steps)),
                                  selected_starts))
-        except (AssertionError, KeyError, OSError, ValueError) as exc:
+        except (AssertionError, KeyError, FileNotFoundError, ValueError) as exc:
             rejection_code = stage
             rejection_reason = str(exc)
+        episode_rows.extend(records)
+        if rejection_code is not None:
+            selected_starts = []
         training_starts = (len(selected_starts) if labels_by_source is not None else
                            sum(end - start - 8 for start, end in ranges)) if rejection_code is None else 0
         feedback.append({
@@ -402,9 +450,7 @@ def export(sources: list[Path], output_root: Path, dataset_name: str,
         })
     output_root.mkdir(parents=True, exist_ok=True)
     write_jsonl(output_root / "feedback.jsonl", feedback)
-    write_jsonl(output_root / "trace.jsonl",
-                (record for directory, events in episode_rows
-                 for record in trace_records(directory, events)))
+    write_jsonl(output_root / "trace.jsonl", episode_rows)
     if approvals is not None:
         write_jsonl(output_root / "review.jsonl",
                     ({"source": source, **{key: value for key, value in decision.items()
@@ -421,6 +467,8 @@ def export(sources: list[Path], output_root: Path, dataset_name: str,
                 "episodes": [], "feedback_file": "feedback.jsonl", "trace_file": "trace.jsonl",
                 "review_file": "review.jsonl" if approvals is not None else None,
                 "quality_labels_file": "quality-labels.jsonl" if labels_by_source is not None else None}
+    if labels_by_source is not None:
+        manifest.update(quality_starts=0, quality_nominal_starts=0, quality_recovery_starts=0)
     if accepted:
         shape = accepted[0][3]
         from lerobot.datasets.lerobot_dataset import LeRobotDataset

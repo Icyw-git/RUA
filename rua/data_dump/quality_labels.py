@@ -16,7 +16,7 @@ from .training_dump import write_jsonl
 from .quality_signals import approach_motion
 
 
-VERSION = "rules-007"
+VERSION = "rules-008"
 
 
 def _carried(rows: list[dict], name: str, radius: float) -> list[bool]:
@@ -290,34 +290,47 @@ def classify(source: Path, oracle_dir: Path) -> list[dict]:
                         unresolved_cycles.append((close_at, i))
                 close_at = None
 
-    unresolved = []
-    for error in sorted(set(errors)):
+    # Confirmed errors take precedence over cycle candidates and later progress.
+    error_indices = sorted(set(errors))
+    for error in error_indices:
         steps[error]["role"], steps[error]["verification"] = "error", "verified"
+    for start, end in error_spans:
+        for step in steps[start:end + 1]:
+            step["role"], step["verification"] = "error", "verified"
+    for i, held_wrong in enumerate(wrong_grasp):
+        if held_wrong and steps[i]["role"] != "error":
+            steps[i]["role"], steps[i]["verification"] = "uncertain", "candidate"
+
+    unresolved_drawers = []
+    for index, error in enumerate(error_indices):
+        next_error = (error_indices[index + 1] if index + 1 < len(error_indices)
+                      else len(steps))
         if error in wrong_drawers:
             name, initial = wrong_drawers[error]
             resume = next((i for i in range(error + 1, len(rows))
                            if abs(rows[i]["fixture_joint_positions"][name] - initial) < 0.015),
                           None)
+            if resume is None:
+                unresolved_drawers.append(error)
         else:
             resume = next((i for i in sorted(set(confirmed_grasps + gained))
                            if i > error and not wrong_grasp[i]), None)
-        if resume is not None:
+        if resume is not None and resume < next_error:
             for step in steps[error + 1:resume + 1]:
                 if (step["role"] != "error" and step["verification"] != "candidate"
                         and not wrong_grasp[step["task_step"]]):
                     step["role"], step["verification"] = "recovery", "verified"
         else:
-            unresolved.append(error)
-    for start, end in error_spans:
-        for step in steps[start:end + 1]:
-            step["role"], step["verification"] = "error", "verified"
+            for step in steps[error + 1:next_error]:
+                if step["role"] != "error" and step["verification"] != "candidate":
+                    step["role"], step["verification"] = "uncertain", "unknown"
     for release, name in unresolved_releases:
         resume = next((i for i in range(release + 1, len(rows))
                        if target_by_name[name][i] or any(
                            item["satisfied"] and item.get("objects", [])[:1] == [name]
                            for item in rows[i]["goal_predicates"])), len(rows) - 1)
         for step in steps[release:resume + 1]:
-            if step["role"] == "nominal":
+            if step["role"] in {"nominal", "recovery"}:
                 step["role"], step["verification"] = "uncertain", "candidate"
     for _, end in unresolved_cycles:
         resume = next((i for i in sorted(set(confirmed_grasps + gained))
@@ -325,9 +338,9 @@ def classify(source: Path, oracle_dir: Path) -> list[dict]:
         for step in steps[end + 1:resume]:
             if step["role"] in {"nominal", "recovery"}:
                 step["role"], step["verification"] = "uncertain", "candidate"
-    if unresolved:
-        for step in steps[min(unresolved) + 1:]:
-            if step["role"] != "error":
+    if unresolved_drawers:
+        for step in steps[min(unresolved_drawers) + 1:]:
+            if step["role"] in {"nominal", "recovery"}:
                 step["role"], step["verification"] = "uncertain", "unknown"
     return _finish(source, trace_hash, oracle_file, rows, steps,
                    covered, family, targets, report.get("object_horizontal_radius_m", {}))

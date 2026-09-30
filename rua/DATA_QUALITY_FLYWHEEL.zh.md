@@ -29,7 +29,7 @@
 
 **抽屉等关节任务：**记录目标关节位置及变化方向。移动了非目标抽屉是明确事件；动作幅度小、先调整末端姿态、为避免碰撞而绕行，都不自动判错。
 
-**恢复：**先确认偏差事件，再确定纠正开始与重新取得有效进度的动作。若只有“闭合→张开→闭合”，只能标 `candidate`。错误物体仍被持有、或尚有未确认的夹爪动作时，不能把这段标成已验证恢复。恢复段包含从偏差状态出发且有证据支持的正确动作；导致偏差的动作单独标记。完成多个物体的正常阶段切换不能被误标为恢复。
+**恢复：**先确认偏差事件，再确定纠正开始与重新取得有效进度的动作。若只有“闭合→张开→闭合”，只能标 `candidate`。错误物体仍被持有、或尚有未确认的夹爪动作时，不能把这段标成已验证恢复。抓错起点标为 error，随后持续持有错误物体的动作标为 uncertain；后续成功不能将它们改为 nominal。再次出错会中断此前的恢复区间，已确认错误与缺证据动作优先于恢复判断。恢复段包含从偏差状态出发且有证据支持的正确动作；导致偏差的动作单独标记。完成多个物体的正常阶段切换不能被误标为恢复。
 
 **慢速、停滞与绕行：**只在同一任务、扰动及相近起点的成功轨迹之间比较任务动作数，不用包含模型等待的墙钟时间。起点难度至少用初始末端到目标距离、目标到放置位置距离和任务物体数作描述；缺少这些量时不强行分难度组。按阶段计算末端路径长度和无目标进展的持续时间；路径短并不等于安全，绕行只作为描述或复核线索。任务需要的静止等待、精细对准及避障不能因为速度低被自动删除。参考轨迹不足时保留原始数值，不生成“快/慢”结论。
 
@@ -38,7 +38,7 @@
 每个连续区间一行，保存在 dump 的 `quality-labels.jsonl`；证据值可以指向对应 `oracle-feedback.jsonl` 步数，不复制视频。示意：
 
 ```json
-{"version":2,"labeler_version":"rules-007","source":"/absolute/episode","source_trace_sha256":"...","oracle_feedback_sha256":"...","task_step_range":[65,83],"task_phase":"approach","role":"uncertain","verification":"candidate","coverage":"complete","events":[{"task_step":70,"event":"gripper_cycle_unresolved","verification":"candidate","evidence":"gripper_command+object_motion+eef_retreat"}],"efficiency":{"eef_path_m":0.12,"stationary_steps":2,"speed_ratio":null,"path_ratio":null,"reference_count":0}}
+{"version":2,"labeler_version":"rules-008","source":"/absolute/episode","source_trace_sha256":"...","oracle_feedback_sha256":"...","task_step_range":[65,83],"task_phase":"approach","role":"uncertain","verification":"candidate","coverage":"complete","events":[{"task_step":70,"event":"gripper_cycle_unresolved","verification":"candidate","evidence":"gripper_command+object_motion+eef_retreat"}],"efficiency":{"eef_path_m":0.12,"stationary_steps":2,"speed_ratio":null,"path_ratio":null,"reference_count":0}}
 ```
 
 这个示例只说明字段，不是对真实轨迹的判定。区间 `[65,83)` 只包含任务动作 65 至 82。`verification=candidate` 的段不会进入 WLA 训练；`coverage=complete` 也不能把候选事件升级为已确认。`source_trace_sha256` 和 `oracle_feedback_sha256` 绑定两份证据。训练用途不写进事实标签，另由明确版本的选择规则生成训练起点。

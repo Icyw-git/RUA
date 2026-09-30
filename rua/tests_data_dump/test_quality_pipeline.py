@@ -347,3 +347,59 @@ def test_unresolved_release_is_candidate_not_proven_drop(tmp_path):
     assert any(label["role"] == "uncertain" and
                label["task_step_range"][0] <= 9 < label["task_step_range"][1]
                for label in labels)
+
+
+@pytest.mark.parametrize('second_error', [False, True])
+def test_wrong_object_hold_never_enters_positive_windows(tmp_path, second_error):
+    source = make_episode(tmp_path, 'held_wrong', task_steps=48)
+    rows = []
+    for i in range(48):
+        wrong = 5 <= i < 18 or (second_error and 23 <= i < 32)
+        rows.append({
+            'task_step': i,
+            'goal_predicates': [{'objects': ['bowl', 'basket_region'], 'satisfied': i == 47}],
+            'eef_position_m': [0.2, 0, 0.1], 'gripper_command': 1.0,
+            'grasped_objects': ['cup'] if wrong else ['bowl'] if 40 <= i < 47 else [],
+            'object_positions_m': {'bowl': [0, 0, 0.04]},
+            'all_object_positions_m': {'bowl': [0, 0, 0.04], 'cup': [0.2, 0, 0.04]},
+        })
+    oracle = tmp_path / 'oracle'
+    write_oracle(source, oracle, rows)
+    labels = classify(source, oracle)
+    roles = {i: label['role'] for label in labels
+             for i in range(*label['task_step_range'])}
+    assert roles[5] == 'error'
+    assert all(roles[i] == 'uncertain' for i in range(6, 18))
+    if second_error:
+        assert roles[23] == 'error'
+        assert all(roles[i] == 'uncertain' for i in range(18, 23))
+        assert all(roles[i] == 'uncertain' for i in range(24, 32))
+    assert roles[39] == 'recovery'
+    starts = quality_starts(source, labels, 48, [(0, 48)])
+    assert starts
+    wrong_steps = {row['task_step'] for row in rows if row['grasped_objects'] == ['cup']}
+    assert all(not wrong_steps.intersection(range(row['frame_index'], row['frame_index'] + 8))
+               for row in starts)
+
+
+def test_fixing_second_wrong_drawer_does_not_clear_first_error(tmp_path):
+    source = make_episode(tmp_path, 'two_wrong_drawers', task_steps=40)
+    rows = [{
+        'task_step': i, 'goal_predicates': [{'satisfied': i == 39}],
+        'eef_position_m': [0, 0, 0.2],
+        'fixture_joint_positions': {
+            'wooden_cabinet_1_top_level': 0.04 if i >= 5 else 0.0,
+            'wooden_cabinet_1_bottom_level': 0.04 if 10 <= i < 25 else 0.0,
+            'wooden_cabinet_1_middle_level': 0.05 if i == 39 else 0.0,
+        },
+    } for i in range(40)]
+    oracle = tmp_path / 'oracle'
+    write_oracle(source, oracle, rows)
+    path = oracle / 'oracle-manifest.json'
+    report = json.loads(path.read_text())
+    report['target_objects'] = []
+    report['goal_states'] = [['open', 'wooden_cabinet_1_middle_region']]
+    path.write_text(json.dumps(report))
+    labels = classify(source, oracle)
+    assert not any(label['role'] in {'nominal', 'recovery'} and label['task_step_range'][1] > 5
+                   for label in labels)
