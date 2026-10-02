@@ -1,6 +1,7 @@
 import json
 import math
 import sys
+from pathlib import Path
 from types import ModuleType
 from types import SimpleNamespace
 
@@ -72,6 +73,7 @@ class FakeLeRobotDataset:
     @classmethod
     def create(cls, **kwargs):
         obj = cls()
+        Path(kwargs["root"]).mkdir(parents=True)
         obj.kwargs = kwargs
         obj.episodes = []
         obj.frames = []

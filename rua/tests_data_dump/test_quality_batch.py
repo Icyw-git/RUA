@@ -70,6 +70,46 @@ def test_mixed_batch_keeps_good_data_and_accounts_for_every_source(tmp_path, mon
     assert any(row['source'] == str(sources['corrupt']) and row['kind'] == 'environment' for row in trace)
 
 
+def test_corrupt_video_rejects_only_its_episode(tmp_path, monkeypatch):
+    pytest.importorskip('lerobot.datasets.lerobot_dataset')
+    good = make_episode(tmp_path, 'good', task_steps=20)
+    bad = make_episode(tmp_path, 'bad', task_steps=20)
+    (bad / 'front-control.mp4').write_bytes(b'broken mp4')
+    monkeypatch.setattr(quality_pipeline, 'replay', replay_fixture)
+    output = tmp_path / 'output'
+    summary = quality_pipeline.run([bad, good], output)
+    assert summary['exported_episodes'] == 1
+    feedback = {row['source']: row for row in map(json.loads,
+                (output / 'dump/feedback.jsonl').read_text().splitlines())}
+    assert feedback[str(bad)]['rejection_code'] == 'audit_failed'
+    assert feedback[str(bad)]['wla_training_starts'] == 0
+    assert feedback[str(good)]['wla_training_starts'] == 12
+    assert (output / 'dump/rua_lerobot/meta/quality-selection.json').is_file()
+
+
+def test_interrupted_export_does_not_publish_partial_dataset(tmp_path, monkeypatch):
+    pytest.importorskip('lerobot.datasets.lerobot_dataset')
+    first = make_episode(tmp_path, 'first', task_steps=20)
+    second = make_episode(tmp_path, 'second', task_steps=20)
+    monkeypatch.setattr(quality_pipeline, 'replay', replay_fixture)
+    original = training_dump.append_episode
+    count = 0
+
+    def append(dataset, directory, result, steps, shape):
+        nonlocal count
+        count += 1
+        if count == 2:
+            raise OSError('Writing the second episode failed')
+        return original(dataset, directory, result, steps, shape)
+
+    monkeypatch.setattr(training_dump, 'append_episode', append)
+    output = tmp_path / 'output'
+    with pytest.raises(OSError, match='second episode'):
+        quality_pipeline.run([first, second], output)
+    assert not (output / 'dump/rua_lerobot').exists()
+    assert not list(output.parent.glob('.rua_lerobot-*'))
+
+
 def test_all_input_failures_write_zero_manifest_without_dataset(tmp_path):
     source = make_episode(tmp_path, 'broken', task_steps=20)
     (source / 'result.json').write_text('[]')

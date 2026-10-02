@@ -111,6 +111,18 @@ def test_quality_starts_refuses_stale_labels(tmp_path):
         quality_starts(source, [label], 20, [(0, 20)])
 
 
+def test_quality_starts_keep_future_frame_inside_reviewed_range(tmp_path):
+    source = make_episode(tmp_path, "source", task_steps=35)
+    trace_hash = hashlib.sha256((source / "environment-steps.jsonl").read_bytes()).hexdigest()
+    label = {"source_trace_sha256": trace_hash, "oracle_feedback_sha256": "oracle",
+             "labeler_version": "rules-008", "task_step_range": [0, 35],
+             "role": "nominal", "verification": "verified", "coverage": "complete"}
+    starts = quality_starts(source, [label], 35, [(10, 30)])
+    assert [row["frame_index"] for row in starts] == list(range(10, 22))
+    assert all(row["selection_version"] == "positive-002" for row in starts)
+    assert [row["frame_index"] for row in quality_starts(source, [label], 35, [(10, 19)])] == [10]
+
+
 def test_wrong_drawer_left_open_is_not_verified_recovery(tmp_path):
     source = make_episode(tmp_path, "drawer", task_steps=25)
     rows = [{

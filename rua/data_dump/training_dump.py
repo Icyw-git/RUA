@@ -10,6 +10,7 @@ import hashlib
 import json
 import math
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import imageio.v2 as imageio
 import numpy as np
@@ -319,11 +320,11 @@ def quality_starts(source: Path, labels: list[dict], task_steps: int,
         role = roles[step]
         if (role not in {"nominal", "recovery"}
                 or any(other != role for other in roles[step:step + 8])
-                or not any(start <= step and step + 8 <= end for start, end in ranges)):
+                or not any(start <= step and step + 8 < end for start, end in ranges)):
             continue
         starts.append({"frame_index": step, "set": role,
                        "labeler_version": next(iter(versions)),
-                       "selection_version": "positive-001"})
+                       "selection_version": "positive-002"})
     return starts
 
 
@@ -412,6 +413,11 @@ def export(sources: list[Path], output_root: Path, dataset_name: str,
         except (AssertionError, KeyError, FileNotFoundError, ValueError) as exc:
             rejection_code = stage
             rejection_reason = str(exc)
+        except OSError as exc:
+            if stage not in {"audit_failed", "camera_incompatible"} or exc.errno is not None:
+                raise
+            rejection_code = stage
+            rejection_reason = str(exc)
         episode_rows.extend(records)
         if rejection_code is not None:
             selected_starts = []
@@ -472,45 +478,48 @@ def export(sources: list[Path], output_root: Path, dataset_name: str,
     if accepted:
         shape = accepted[0][3]
         from lerobot.datasets.lerobot_dataset import LeRobotDataset
-        dataset = LeRobotDataset.create(
-            repo_id=dataset_name, root=output_root / dataset_name, fps=FPS,
-            robot_type="libero", features=features(shape), use_videos=True, vcodec="h264",
-        )
-        try:
-            all_quality_starts = []
-            for directory, result, steps, _, task_step_range, starts in accepted:
-                append_episode(dataset, directory, result, steps, shape)
-                episode_index = len(manifest["episodes"])
-                all_quality_starts.extend({"episode_index": episode_index, **start}
-                                          for start in starts)
-                manifest["episodes"].append({
-                    "episode_index": episode_index, "source": str(directory),
-                    "task_step_range": list(task_step_range),
-                    "suite": result.get("pilot", {}).get("suite"),
-                    "task_id": result.get("task_id"), "initial_state_id": result.get("initial_state_id"),
-                    "mode": result.get("mode"), "backend": result.get("backend"),
-                    "frames": len(steps), "wla_training_starts": (
-                        len(starts) if labels_by_source is not None else len(steps) - 8),
-                    "official_success": result["official_success"],
-                    "task_instruction": result["task_instruction"],
-                    "control_tokens": sorted({step["token"] for step in steps}),
+        with TemporaryDirectory(prefix=f".{dataset_name}-", dir=output_root.parent) as staging:
+            dataset_root = Path(staging) / dataset_name
+            dataset = LeRobotDataset.create(
+                repo_id=dataset_name, root=dataset_root, fps=FPS,
+                robot_type="libero", features=features(shape), use_videos=True, vcodec="h264",
+            )
+            try:
+                all_quality_starts = []
+                for directory, result, steps, _, task_step_range, starts in accepted:
+                    append_episode(dataset, directory, result, steps, shape)
+                    episode_index = len(manifest["episodes"])
+                    all_quality_starts.extend({"episode_index": episode_index, **start}
+                                              for start in starts)
+                    manifest["episodes"].append({
+                        "episode_index": episode_index, "source": str(directory),
+                        "task_step_range": list(task_step_range),
+                        "suite": result.get("pilot", {}).get("suite"),
+                        "task_id": result.get("task_id"), "initial_state_id": result.get("initial_state_id"),
+                        "mode": result.get("mode"), "backend": result.get("backend"),
+                        "frames": len(steps), "wla_training_starts": (
+                            len(starts) if labels_by_source is not None else len(steps) - 8),
+                        "official_success": result["official_success"],
+                        "task_instruction": result["task_instruction"],
+                        "control_tokens": sorted({step["token"] for step in steps}),
+                    })
+            finally:
+                dataset.finalize()
+            if labels_by_source is not None:
+                meta = dataset_root / "meta"
+                meta.mkdir(parents=True, exist_ok=True)
+                write_jsonl(meta / "quality-starts.jsonl", all_quality_starts)
+                save_json(meta / "quality-selection.json", {
+                    "version": 1, "selection_version": "positive-002",
+                    "wla_chunk_size": 8,
+                    "training_starts": len(all_quality_starts),
                 })
-        finally:
-            dataset.finalize()
-        if labels_by_source is not None:
-            meta = output_root / dataset_name / "meta"
-            meta.mkdir(parents=True, exist_ok=True)
-            write_jsonl(meta / "quality-starts.jsonl", all_quality_starts)
-            save_json(meta / "quality-selection.json", {
-                "version": 1, "selection_version": "positive-001",
-                "wla_chunk_size": 8,
-                "training_starts": len(all_quality_starts),
-            })
-            manifest["quality_starts"] = len(all_quality_starts)
-            manifest["quality_nominal_starts"] = sum(
-                row["set"] == "nominal" for row in all_quality_starts)
-            manifest["quality_recovery_starts"] = sum(
-                row["set"] == "recovery" for row in all_quality_starts)
+                manifest["quality_starts"] = len(all_quality_starts)
+                manifest["quality_nominal_starts"] = sum(
+                    row["set"] == "nominal" for row in all_quality_starts)
+                manifest["quality_recovery_starts"] = sum(
+                    row["set"] == "recovery" for row in all_quality_starts)
+            dataset_root.rename(output_root / dataset_name)
     if labels_by_source is not None:
         write_jsonl(output_root / "quality-labels.jsonl",
                     (row for source in sorted(labels_by_source)
