@@ -81,6 +81,15 @@ def replay(source: Path, output: Path) -> dict:
                 },
                 "eef_position_m": np.asarray(observation["robot0_eef_pos"],
                                               dtype=float).tolist(),
+                "eef_quaternion_xyzw": np.asarray(observation["robot0_eef_quat"],
+                                                   dtype=float).tolist(),
+                "gripper_qpos_m": np.asarray(observation["robot0_gripper_qpos"],
+                                              dtype=float).tolist(),
+                "object_quaternions_wxyz": {
+                    name: np.asarray(env.sim.data.body_xquat[env.env.obj_body_id[name]],
+                                     dtype=float).tolist()
+                    for name in sorted(env.env.objects_dict)
+                },
                 "gripper_command": float(event["action"][-1]),
                 "grasped_objects": sorted(
                     name for name, obj in env.env.objects_dict.items()
@@ -98,7 +107,7 @@ def replay(source: Path, output: Path) -> dict:
     if task_step != result["task_steps"]:
         raise ValueError("Replayed task step count differs from result.json")
     report = {
-        "version": 2, "source": str(source), "scope": result.get("scope"),
+        "version": 3, "source": str(source), "scope": result.get("scope"),
         "task_steps": task_step, "verified_max_eef_position_error_m": max_pose_error_m,
         "source_trace_sha256": hashlib.sha256(trace_file.read_bytes()).hexdigest(),
         "target_objects": target_objects,

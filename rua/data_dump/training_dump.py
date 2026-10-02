@@ -192,8 +192,10 @@ def write_jsonl(path: Path, records) -> None:
             stream.write(json.dumps(record, ensure_ascii=False, allow_nan=False) + "\n")
 
 
-def trace_records(directory: Path, events: list[dict]):
+def trace_records(directory: Path, events: list[dict], warnings: list[str] | None = None):
     """Keep event streams separate by kind; IDs are captured during execution."""
+    if warnings is None:
+        warnings = []
     source = str(directory)
     for event in events:
         record = dict(event)
@@ -209,10 +211,33 @@ def trace_records(directory: Path, events: list[dict]):
         path = run / "steps.json"
         if not path.is_file():
             path = run / "steps.jsonl"
-        records = (json.loads(path.read_text()) if path.suffix == ".json" else
-                   [json.loads(line) for line in path.read_text().splitlines() if line])
-        for record in records:
-            step = int(record["i"])
+        if path.suffix == ".json":
+            try:
+                records = json.loads(path.read_text())
+                if not isinstance(records, list):
+                    raise ValueError("Agent steps must be a list")
+            except (ValueError, UnicodeError) as exc:
+                warnings.append(f"{path}: {exc}")
+                records = []
+        else:
+            records = []
+            try:
+                lines = path.read_text().splitlines()
+            except UnicodeError as exc:
+                warnings.append(f"{path}: {exc}")
+                lines = []
+            for number, line in enumerate(lines, 1):
+                if line.strip():
+                    try:
+                        records.append(json.loads(line))
+                    except ValueError as exc:
+                        warnings.append(f"{path} line {number}: {exc}")
+        for number, record in enumerate(records, 1):
+            try:
+                step = int(record["i"])
+            except (KeyError, TypeError, ValueError) as exc:
+                warnings.append(f"{path} record {number}: {exc}")
+                continue
             yield {
                 "source": source, "kind": "agent_decision",
                 "decision_index": step, "record": record,
@@ -222,18 +247,28 @@ def trace_records(directory: Path, events: list[dict]):
         for name in ("metadata", "subgoals", "planner_diagnostics", "summary"):
             artifact = run / f"{name}.json"
             if artifact.is_file():
+                try:
+                    record = json.loads(artifact.read_text())
+                except (ValueError, UnicodeError) as exc:
+                    warnings.append(f"{artifact}: {exc}")
+                    continue
                 yield {"source": source, "kind": "agent_artifact",
-                       "artifact_type": name, "record": json.loads(artifact.read_text())}
+                       "artifact_type": name, "record": record}
     for path in sorted((directory / "requests").glob("request-*/request.json")):
-        request = json.loads(path.read_text())
         parent = path.parent
+        try:
+            request = json.loads(path.read_text())
+            call_id = request["call_id"]
+            prompt = (parent / "prompt.txt").read_text() if (parent / "prompt.txt").is_file() else None
+            response = ((parent / "response.txt").read_text()
+                        if (parent / "response.txt").is_file() else None)
+        except (KeyError, TypeError, ValueError, UnicodeError) as exc:
+            warnings.append(f"{path}: {exc}")
+            continue
         yield {
             "source": source, "kind": "model_request",
-            "call_id": request["call_id"], "request": request,
-            "prompt": (parent / "prompt.txt").read_text()
-            if (parent / "prompt.txt").is_file() else None,
-            "response": (parent / "response.txt").read_text()
-            if (parent / "response.txt").is_file() else None,
+            "call_id": call_id, "request": request,
+            "prompt": prompt, "response": response,
             "front_image": str(parent / "front.png"),
             "wrist_image": str(parent / "wrist.png"),
         }
@@ -353,8 +388,13 @@ def export(sources: list[Path], output_root: Path, dataset_name: str,
         quality_role_steps = {}
         stage = "trace_invalid"
         records = []
+        trace_warnings = []
         try:
-            records.extend(trace_records(directory, events))
+            records.extend(trace_records(directory, events, trace_warnings))
+            for index, _ in enumerate(result.get("request_records", []), 1):
+                request_path = directory / "requests" / f"request-{index:03d}" / "request.json"
+                if not request_path.is_file():
+                    trace_warnings.append(f"{request_path}: missing Agent request record")
             failure = source_failures.get(str(directory))
             if failure:
                 stage = failure["rejection_code"]
@@ -366,7 +406,7 @@ def export(sources: list[Path], output_root: Path, dataset_name: str,
             if "pilot" not in result:
                 raise ValueError("Legacy rollout schema; no RUA pre-action frame alignment")
             stage = "audit_failed"
-            audit_episode(directory)
+            audit_episode(directory, require_request_files=False)
             audit_pass = True
             stage = "task_not_successful"
             if result.get("status") != "completed" or (
@@ -453,6 +493,7 @@ def export(sources: list[Path], output_root: Path, dataset_name: str,
                                            else None),
             "rejection_code": rejection_code,
             "rejection_reason": rejection_reason,
+            "trace_warnings": trace_warnings,
         })
     output_root.mkdir(parents=True, exist_ok=True)
     write_jsonl(output_root / "feedback.jsonl", feedback)

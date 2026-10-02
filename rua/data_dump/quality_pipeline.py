@@ -14,6 +14,9 @@ from .quality_signals import behavior_signals, review_starts, signal_counts
 from .training_dump import discover, episode_steps, export, read_source, write_jsonl
 
 
+NORMAL_REJECTIONS = {"task_not_successful", "review_rejected", "quality_no_training_starts"}
+
+
 def annotate_efficiency(labels: list[dict], episode_metrics: list[dict]) -> None:
     """Add descriptive cohort ratios; they never change training selection."""
     for current in episode_metrics:
@@ -78,14 +81,16 @@ def run(sources: list[Path], output_root: Path, dataset_name: str = "rua_lerobot
         episode_metrics.append(metric)
     annotate_efficiency(labels, episode_metrics)
     signals = []
-    for source in episodes:
+    for index, source in enumerate(episodes):
         if str(source) in source_failures:
             continue
         source_labels = [label for label in labels if label["source"] == str(source)]
         report = oracle_reports[str(source)]
+        rows = [json.loads(line) for line in
+                (oracle_root / f"{index:04d}" / report["feedback_file"]).read_text().splitlines()]
         source_signals = behavior_signals(
             source_labels, report["object_horizontal_radius_m"],
-            set(report["target_objects"]))
+            set(report["target_objects"]), rows)
         signals.extend(source_signals)
     label_path = output_root / "quality-labels.jsonl"
     write_jsonl(label_path, labels)
@@ -102,9 +107,15 @@ def run(sources: list[Path], output_root: Path, dataset_name: str = "rua_lerobot
                               if start["episode_index"] == episode["episode_index"]]
             review.extend(review_starts(episode_starts, signals, source))
     write_jsonl(output_root / "review-starts.jsonl", review)
+    feedback = [json.loads(line) for line in
+                (output_root / "dump/feedback.jsonl").read_text().splitlines()]
     summary = {"sources": len(episodes), "segments": len(labels),
                "exported_episodes": len(manifest["episodes"]),
                "preprocessing_failed_sources": len(source_failures),
+               "export_failed_sources": sum(
+                   row["source"] not in source_failures
+                   and row["rejection_code"] is not None
+                   and row["rejection_code"] not in NORMAL_REJECTIONS for row in feedback),
                "rejected_sources": len(episodes) - len(manifest["episodes"]),
                "training_starts": manifest.get("quality_starts", 0),
                "nominal_starts": manifest.get("quality_nominal_starts", 0),
@@ -125,7 +136,8 @@ def main() -> int:
     args = parser.parse_args()
     summary = run(args.sources, args.output_root, args.dataset_name)
     print(json.dumps(summary, indent=2))
-    return 2 if summary["preprocessing_failed_sources"] else 0
+    return 2 if (summary["preprocessing_failed_sources"]
+                 or summary.get("export_failed_sources", 0)) else 0
 
 
 if __name__ == "__main__":

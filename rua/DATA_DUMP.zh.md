@@ -20,11 +20,15 @@
 
 主要文件：`oracle/` 是逐步仿真证据；`quality-labels.jsonl` 是原轨迹的逐段标签；`behavior-signals.jsonl` 是慢速、绕行或重复夹爪周期的候选区间及证据；`review-starts.jsonl` 列出这些候选区间覆盖的已导出训练起点；`dump/feedback.jsonl` 是每条轨迹的入选数量和拒绝原因；`dump/rua_lerobot/meta/quality-starts.jsonl` 是训练起点；`summary.json` 是本次汇总。行为信号目前是影子分析，不改变训练起点。导出结果使用 `selection_mode=quality`，与下文的旧式 `technical_success_only` 格式测试导出明确区分。
 
-批量处理时，单条输入、回放或分类失败会在 `dump/feedback.jsonl` 中记录 `source_invalid`、`replay_failed` 或 `classification_failed`，其余来源继续执行。`summary.json` 的 `preprocessing_failed_sources` 统计这些失败，`rejected_sources` 统计最终未导出的来源总数。拒绝来源的最终训练起点及两类起点计数均为零。正常完成退出码为 `0`（包括正常筛选后全部不入选）；有预处理失败则完成剩余导出后返回 `2`。依赖、系统或程序故障仍中止。全部拒绝时保留反馈和零计数 manifest，不创建空数据集。
+批量处理时，单条输入、回放、分类或导出检查失败会在 `dump/feedback.jsonl` 中记录原因，其余来源继续执行。`summary.json` 的 `preprocessing_failed_sources` 统计回放与分类前后的失败，`export_failed_sources` 统计导出检查失败，`rejected_sources` 统计最终未导出的来源总数。拒绝来源的最终训练起点及两类起点计数均为零。正常完成退出码为 `0`（包括正常筛选后全部不入选）；任一阶段有单条数据处理失败则完成剩余导出后返回 `2`。依赖、系统或程序故障仍中止。全部拒绝时保留反馈和零计数 manifest，不创建空数据集。可选 Agent 日志损坏时，反馈的 `trace_warnings` 记录文件和原因；只要机器人训练数据与回放证据完整，该轨迹仍可进入 WLA 数据集。
 
 训练加载器在发现 `quality-starts.jsonl` 时自动按它筛选。`quality_set=auto` 读取所有获选正面样本，也可以在训练配置里设 `quality_set=nominal` 或 `quality_set=recovery` 分别读取。数据目录指向 `YOUR_QUALITY_DUMP/dump`。当前标签器只支持 LIBERO 仿真回放中的抓取/放置与抽屉目标；缺少可重放的物理证据时保持待定，不声称能判断路径是否最优。当前规则版本为 `rules-008`；此前版本的标签与导出计数不能直接当作新版结果。
 
-夹爪候选使用 `repeated_gripper_cycle`，`evidence.cycle_count` 统计夹爪周期结束事件，不等于目标抓取尝试次数。`task_step_range` 只覆盖这些事件所在范围，可能包含中间调整动作，不能直接用作训练片段边界。信号版本为 `signals-002`；历史 `signals-001` 产物保留原字段，重新运行流程会生成新字段，不同时输出两套名称。
+夹爪候选使用 `repeated_gripper_cycle`，`evidence.cycle_count` 统计夹爪周期结束事件，不等于目标抓取尝试次数。`task_step_range` 只覆盖这些事件所在范围，可能包含中间调整动作，不能直接用作训练片段边界。当前信号版本为 `signals-004`，历史产物保留。
+
+新增低进展候选复用 `inefficient_motion`，通过 `evidence.reason=low_progress` 区分。检查放置任务中证据完整的接近片段：已验证的 `nominal`、`recovery` 以及无法确认动作好坏的 `uncertain` 都可生成复查候选；`error` 不纳入。`evidence.action_role` 保留原动作标签，不修改 `quality-labels.jsonl` 或 WLA 训练起点。片段还需满足夹爪打开、没有持物。单目标任务直接关联目标；多目标任务必须有紧接该段的明确目标抓取，否则跳过。连续至少 24 步（当前 20 Hz 下为 1.2 秒），手的位置偏移不超过 5 mm、转动不超过 3°、夹爪实际位置变化不超过 1 mm、场景中所有物体的位置偏移不超过 2 mm 且转动不超过 3°，并且目标条件和关节状态没有变化，才生成候选。偏移比较整个区间相对于起点的最大变化，不把多段缓慢推进合并成“停滞”。这些容差是待验证的排查标准，不能证明动作无用。`review-starts.jsonl` 仅列出候选覆盖的已入选训练起点；来自未入选的 `uncertain` 片段可能只在 `behavior-signals.jsonl` 出现。
+
+回放证据版本 3 增加 `eef_quaternion_xyzw`（末端姿态）、`gripper_qpos_m`（实际夹爪关节位置）及 `object_quaternions_wxyz`（各物体姿态）。旧证据缺少这些字段时不生成低进展候选。证据记录的是执行后的状态，所以判断时额外读取前一步作比较；没有执行前状态的第 0 步不标记。候选区间采用 `[start,end)`，证据记录实际偏移、转角、步数和目标物体。该功能**不改四类动作标签、不减少训练起点**；即使动作慢，也可能是在精细调整，后续需验证候选是否有用。
 
 下面是原有的基础导出和人工复核流程，接口继续可用。
 

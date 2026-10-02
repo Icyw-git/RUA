@@ -51,7 +51,7 @@ def audit_wla_records(directory, result, events):
     assert not result.get("worker_alive", True), "Prediction worker did not shut down"
 
 
-def audit_episode(directory):
+def audit_episode(directory, *, require_request_files=True):
     result = json.loads((directory / "result.json").read_text())
     events = [json.loads(x) for x in (directory / "environment-steps.jsonl").read_text().splitlines()]
     starts = {e["attempt"]: e for e in events if e["event"] == "step_started"}
@@ -79,7 +79,8 @@ def audit_episode(directory):
     for index, record in enumerate(records, 1):
         assert record["call_id"] == index
         assert [x["camera"] for x in record["image_manifest"]] == ["front", "wrist"]
-        assert (directory / "requests" / f"request-{index:03d}" / "request.json").exists()
+        if require_request_files:
+            assert (directory / "requests" / f"request-{index:03d}" / "request.json").exists()
     video_counts = {}
     for name in ("front", "wrist"):
         reader = imageio.get_reader(directory / f"{name}-control.mp4")

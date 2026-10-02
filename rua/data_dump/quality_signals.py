@@ -4,8 +4,101 @@ from __future__ import annotations
 from collections import Counter
 from math import dist
 
+import numpy as np
 
-VERSION = "signals-002"
+
+VERSION = "signals-004"
+
+# Candidate tolerances at the existing 20 Hz action rate, not training filters.
+LOW_PROGRESS_STEPS = 24
+HAND_POSITION_TOLERANCE_M = 0.005
+OBJECT_POSITION_TOLERANCE_M = 0.002
+ROTATION_TOLERANCE_DEG = 3.0
+GRIPPER_TOLERANCE_M = 0.001
+
+
+def _position_excursion(values) -> float:
+    values = np.asarray(values, dtype=float)
+    return float(np.linalg.norm(values - values[0], axis=1).max())
+
+
+def _rotation_excursion(quaternions) -> float:
+    quaternions = np.asarray(quaternions, dtype=float)
+    quaternions /= np.linalg.norm(quaternions, axis=1, keepdims=True)
+    cosines = np.clip(np.abs(quaternions @ quaternions[0]), 0, 1)
+    return float(np.degrees(2 * np.arccos(cosines)).max())
+
+
+def _low_progress_evidence(rows: list[dict]) -> dict | None:
+    if any(row["grasped_objects"] or row["gripper_command"] >= 0 for row in rows):
+        return None
+    goals = [[item["satisfied"] for item in row["goal_predicates"]] for row in rows]
+    if any(goal != goals[0] for goal in goals[1:]):
+        return None
+    # Any fixture motion may be useful interaction, including an intermediate goal.
+    if any(row.get("fixture_joint_positions", {}) != rows[0].get("fixture_joint_positions", {})
+           for row in rows[1:]):
+        return None
+    hand = _position_excursion([row["eef_position_m"] for row in rows])
+    rotation = _rotation_excursion([row["eef_quaternion_xyzw"] for row in rows])
+    fingers = _position_excursion([row["gripper_qpos_m"] for row in rows])
+    objects = rows[0]["all_object_positions_m"]
+    object_move = max((_position_excursion([row["all_object_positions_m"][name] for row in rows])
+                       for name in objects), default=0.0)
+    object_rotation = max((_rotation_excursion([row["object_quaternions_wxyz"][name] for row in rows])
+                           for name in objects), default=0.0)
+    if (hand > HAND_POSITION_TOLERANCE_M or rotation > ROTATION_TOLERANCE_DEG
+            or fingers > GRIPPER_TOLERANCE_M or object_move > OBJECT_POSITION_TOLERANCE_M
+            or object_rotation > ROTATION_TOLERANCE_DEG):
+        return None
+    return {"reason": "low_progress", "steps": len(rows) - 1,
+            "eef_excursion_m": hand, "eef_rotation_deg": rotation,
+            "gripper_excursion_m": fingers, "object_excursion_m": object_move,
+            "object_rotation_deg": object_rotation}
+
+
+def low_progress_signals(labels: list[dict], rows: list[dict], targets: set[str]) -> list[dict]:
+    """Find sustained quiet approach intervals; never change action roles or starts."""
+    required = {"eef_quaternion_xyzw", "gripper_qpos_m", "object_quaternions_wxyz"}
+    if not rows or not all(required <= row.keys() for row in rows):
+        return []
+    signals = []
+    for label in labels:
+        role = label["role"]
+        if (label.get("task_family") != "placement" or label.get("task_phase") != "approach"
+                or role not in {"nominal", "recovery", "uncertain"}
+                or (role != "uncertain" and label.get("verification") != "verified")
+                or label.get("coverage") != "complete"):
+            continue
+        start, end = label["task_step_range"]
+        # Multiple targets require an immediately following, unambiguous grasp.
+        candidates = targets if len(targets) == 1 else (
+            set(rows[end]["grasped_objects"]) & targets if end < len(rows) else set())
+        if len(candidates) != 1:
+            continue
+        target = next(iter(candidates))
+        # Rows are post-action states. Include the preceding state so that a
+        # movement into a quiet interval is not itself called low progress.
+        cursor = max(start, 1)
+        while cursor + LOW_PROGRESS_STEPS <= end:
+            stop = cursor + LOW_PROGRESS_STEPS
+            evidence = _low_progress_evidence(rows[cursor - 1:stop])
+            if evidence is None:
+                cursor += 1
+                continue
+            while stop < end:
+                extended = _low_progress_evidence(rows[cursor - 1:stop + 1])
+                if extended is None:
+                    break
+                stop += 1
+                evidence = extended
+            evidence["target_object"] = target
+            evidence["action_role"] = role
+            signals.append({"source": label["source"], "task_step_range": [cursor, stop],
+                            "kind": "inefficient_motion", "status": "candidate",
+                            "evidence": evidence, "version": VERSION})
+            cursor = stop
+    return signals
 
 
 def approach_motion(rows: list[dict], targets: set[str], radius: float) -> dict | None:
@@ -31,11 +124,11 @@ def approach_motion(rows: list[dict], targets: set[str], radius: float) -> dict 
 
 
 def behavior_signals(labels: list[dict], radii: dict[str, float],
-                     targets: set[str]) -> list[dict]:
+                     targets: set[str], rows: list[dict] | None = None) -> list[dict]:
     """Propose review intervals for one episode, without changing role labels."""
     if not labels:
         return []
-    signals = []
+    signals = low_progress_signals(labels, rows, targets) if rows is not None else []
     for label in labels:
         motion = label["efficiency"].get("approach_motion")
         if label["role"] not in {"nominal", "recovery"} or not motion:

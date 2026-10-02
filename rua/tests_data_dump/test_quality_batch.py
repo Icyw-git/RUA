@@ -53,6 +53,7 @@ def test_mixed_batch_keeps_good_data_and_accounts_for_every_source(tmp_path, mon
     summary = quality_pipeline.run(list(sources.values()), output)
     assert summary['sources'] == 6
     assert summary['preprocessing_failed_sources'] == 4
+    assert summary['export_failed_sources'] == 1
     assert summary['rejected_sources'] == 5
     assert summary['exported_episodes'] == 1
     feedback = [json.loads(line) for line in (output / 'dump/feedback.jsonl').read_text().splitlines()]
@@ -79,12 +80,43 @@ def test_corrupt_video_rejects_only_its_episode(tmp_path, monkeypatch):
     output = tmp_path / 'output'
     summary = quality_pipeline.run([bad, good], output)
     assert summary['exported_episodes'] == 1
+    assert summary['preprocessing_failed_sources'] == 0
+    assert summary['export_failed_sources'] == 1
     feedback = {row['source']: row for row in map(json.loads,
                 (output / 'dump/feedback.jsonl').read_text().splitlines())}
     assert feedback[str(bad)]['rejection_code'] == 'audit_failed'
     assert feedback[str(bad)]['wla_training_starts'] == 0
     assert feedback[str(good)]['wla_training_starts'] == 12
     assert (output / 'dump/rua_lerobot/meta/quality-selection.json').is_file()
+
+
+def test_bad_agent_logs_warn_without_losing_wla_data(tmp_path, monkeypatch):
+    pytest.importorskip('lerobot.datasets.lerobot_dataset')
+    good = make_episode(tmp_path, 'good', task_steps=20)
+    bad = make_episode(tmp_path, 'bad', task_steps=20)
+    missing = make_episode(tmp_path, 'missing_request', task_steps=20)
+    (bad / 'native/session/steps.json').write_text('[null]')
+    (bad / 'native/session/subgoals.json').write_text('{broken')
+    (bad / 'requests/request-001/request.json').write_text('{broken')
+    (missing / 'requests/request-001/request.json').unlink()
+    monkeypatch.setattr(quality_pipeline, 'replay', replay_fixture)
+    output = tmp_path / 'output'
+    summary = quality_pipeline.run([bad, good, missing], output)
+
+    assert summary['exported_episodes'] == 3
+    assert summary['preprocessing_failed_sources'] == 0
+    assert summary['export_failed_sources'] == 0
+    feedback = {row['source']: row for row in map(json.loads,
+                (output / 'dump/feedback.jsonl').read_text().splitlines())}
+    assert feedback[str(bad)]['wla_training_starts'] == 12
+    assert feedback[str(bad)]['rejection_code'] is None
+    assert len(feedback[str(bad)]['trace_warnings']) == 3
+    assert feedback[str(missing)]['wla_training_starts'] == 12
+    assert len(feedback[str(missing)]['trace_warnings']) == 1
+    assert feedback[str(good)]['trace_warnings'] == []
+    trace = [json.loads(line) for line in (output / 'dump/trace.jsonl').read_text().splitlines()]
+    assert any(row['source'] == str(bad) and row['kind'] == 'environment' for row in trace)
+    assert any(row['source'] == str(good) and row['kind'] == 'agent_decision' for row in trace)
 
 
 def test_interrupted_export_does_not_publish_partial_dataset(tmp_path, monkeypatch):
@@ -136,14 +168,19 @@ def test_quality_rejection_is_not_processing_failure(tmp_path, monkeypatch):
     monkeypatch.setattr(quality_pipeline, 'classify', classify)
     summary = quality_pipeline.run([source], tmp_path / 'output')
     assert summary['preprocessing_failed_sources'] == 0
+    assert summary['export_failed_sources'] == 0
     assert summary['rejected_sources'] == 1
     assert summary['training_starts'] == 0
 
 
-@pytest.mark.parametrize('failure_count,exit_code', [(0, 0), (1, 2)])
-def test_cli_reports_partial_processing_failure(monkeypatch, failure_count, exit_code):
+@pytest.mark.parametrize('preprocess_count,export_count,exit_code',
+                         [(0, 0, 0), (1, 0, 2), (0, 1, 2)])
+def test_cli_reports_partial_processing_failure(monkeypatch, preprocess_count,
+                                                export_count, exit_code):
     monkeypatch.setattr('sys.argv', ['quality_pipeline', '/source', '--output-root', '/output'])
-    monkeypatch.setattr(quality_pipeline, 'run', lambda *args: {'preprocessing_failed_sources': failure_count})
+    monkeypatch.setattr(quality_pipeline, 'run', lambda *args: {
+        'preprocessing_failed_sources': preprocess_count,
+        'export_failed_sources': export_count})
     assert quality_pipeline.main() == exit_code
 
 
