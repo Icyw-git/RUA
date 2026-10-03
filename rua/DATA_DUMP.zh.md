@@ -4,12 +4,15 @@
 
 新数据统一使用下面的质量流程。下文基础导出和人工复核仅用于格式检查或已有审核任务，无需再串联运行。
 
-已有 episode 保存后，可在 `/data1/wcz` 的独立仿真环境里一次完成回放、分类、导出。输入可以是一个 episode，也可以是包含多个 episode 的目录；输出目录需为空：
+已有 episode 保存后，可在独立仿真环境里一次完成回放、分类、导出。离线脚本只依赖 `rua/` 代码，可以从本仓库或独立克隆的 `nanorua/rua` 运行。先配置仿真 Python；若 LIBERO 没安装在该环境中，再将 `LIBERO_PYTHONPATH` 指向包含 `libero/` Python 包的目录。使用 LIBERO-PRO 时，还应将 `LIBERO_CONFIG_PATH` 指向对应配置目录。`RUA_ROOT` 默认是仓库目录的父目录，可按需要设置。输入可以是一个 episode，也可以是包含多个 episode 的目录；输出目录需为空：
 
 ```bash
-/data1/wcz/WLA/rua/scripts/offline/run_quality_pipeline.sh \
-  /data1/wcz/artifacts/rua-stage3/YOUR_EPISODE \
-  --output-root /data1/wcz/rua-dumps/YOUR_QUALITY_DUMP
+export RUA_VENV_PYTHON=/path/to/rua-sim/bin/python
+export LIBERO_PYTHONPATH=/path/to/LIBERO-PRO/libero
+export LIBERO_CONFIG_PATH=/path/to/libero-pro-config
+/path/to/RUA/rua/scripts/offline/run_quality_pipeline.sh \
+  /path/to/YOUR_EPISODE \
+  --output-root /path/to/YOUR_QUALITY_DUMP
 ```
 
 程序逐步回放原动作并核对末端位置和官方任务结果；它记录物体位置、末端位置、夹爪接触、物体与夹爪的相对运动、物体尺寸、抽屉关节和目标条件。`quality-labels.jsonl` 把动作段标为 `nominal`（有后续子目标支持、未发现明确错误）、`recovery`（已确认错误后的纠正）、`error` 或 `uncertain`。`task_phase` 是辅助诊断，可能为空，不参与训练筛选。`verification` 记录证据是否确认，`coverage` 记录所需状态是否齐全。当前只自动处理任务目标为 `On`、`In`、`Open`、`Close` 的轨迹；其他目标保存为 `unsupported/uncertain`。夹爪命令变化本身不能证明抓住、抓空或掉落；只有物体水平跟着末端移动也不足以证明抓取。放手后没有明确目标达成或下落证据时，标成待定。证据不完整的段不进入正面训练起点。标签另存末端路径长度和静止步数；同一 scope、suite、task、初始状态下至少有三条其他成功轨迹时，才写相对步数和路径比值。快慢不决定入选。
@@ -82,9 +85,9 @@ PYTHONPATH=/data1/wcz/WLA/rua/scripts:/data1/wcz/WLA/rua/vendor/show_harness:/da
 如果原始运行保存了 `task.bddl`、`initial_state.npy` 和逐步动作，可以离线重放，补充每个动作后的目标条件和目标物体位置：
 
 ```bash
-/data1/wcz/WLA/rua/scripts/offline/run_oracle_feedback.sh \
-  /data1/wcz/artifacts/rua-stage3/YOUR_EPISODE \
-  --output /data1/wcz/rua-dumps/YOUR_ORACLE
+/path/to/RUA/rua/scripts/offline/run_oracle_feedback.sh \
+  /path/to/YOUR_EPISODE \
+  --output /path/to/YOUR_ORACLE
 ```
 
 生成的 `oracle-feedback.jsonl` 每行对应一个任务动作，含 `task_step`、原始 `attempt`、动作后的 `goal_predicates`（如 `on(bowl,plate)` 是否成立）、`object_positions_m`（目标条件中物体的世界坐标）和该步的 `official_success`。`oracle-manifest.json` 记录来源、原始 trace 哈希和回放机械臂末端位置的最大误差。回放会逐步对照原始末端位置与官方成功值；不一致则报错。这里的物体位置只包括目标条件提到的物体，不是全部场景物体；它也不能单独证明“抓取成功”。仿真真值只写在离线分析文件，不送给当时的控制器。
