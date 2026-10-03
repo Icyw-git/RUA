@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Source from task launchers only; never modify the user's shell configuration.
 RUA_CODE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
-WLA_ROOT="$(cd "$RUA_CODE/.." && pwd -P)"
+WLA_ROOT="$(cd "${WLA_ROOT:-$RUA_CODE/..}" && pwd -P)"
 RUA_ROOT="${RUA_ROOT:-$(dirname "$WLA_ROOT")}"
 RUA_RUNTIME="${RUA_RUNTIME:-$RUA_ROOT/runtime/wla-libero}"
 export RUA_CODE WLA_ROOT RUA_ROOT RUA_RUNTIME

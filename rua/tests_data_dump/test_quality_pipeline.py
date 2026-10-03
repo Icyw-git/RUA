@@ -9,7 +9,7 @@ import pytest
 from data_dump.quality_labels import _carried, classify
 from data_dump.quality_pipeline import annotate_efficiency
 from data_dump.training_dump import export, quality_starts
-from test_training_dump import make_episode
+from test_training_dump import make_episode, make_norm_stats
 
 
 def write_oracle(source: Path, root: Path, rows: list[dict]):
@@ -83,7 +83,7 @@ def test_quality_dump_preserves_full_history_and_filters_eight_actions(tmp_path)
     assert manifest["episodes"][0]["frames"] == 35
 
     data_args = SimpleNamespace(dataset_root_dir=str(output),
-                                norm_stats_path="/data1/wcz/WLA/configs/norm_stats.json",
+                                norm_stats_path=str(make_norm_stats(tmp_path)),
                                 unnorm_key="libero_all", quality_set="recovery")
     model_args = SimpleNamespace(chunk_size=8, sample_num=1, use_history_obs=True,
                                  history_obs_step=8, action_condition_type="no_action_condition")

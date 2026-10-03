@@ -67,6 +67,15 @@ def make_episode(root, name, *, success=True, pre_state=True, task_steps=9):
     return directory
 
 
+def make_norm_stats(root):
+    path = root / "norm_stats.json"
+    path.write_text(json.dumps({"libero_all": {
+        "observation.state": {"min": [-1.0] * 8, "max": [1.0] * 8},
+        "action": {"min": [-1.0] * 7, "max": [1.0] * 7},
+    }}))
+    return path
+
+
 class FakeLeRobotDataset:
     created = []
 
@@ -321,7 +330,7 @@ def test_wla_train_loader_roundtrip(tmp_path, monkeypatch):
     output = tmp_path / "dump"
     export([source], output, "rua_lerobot", review)
     data_args = SimpleNamespace(dataset_root_dir=str(output),
-                                norm_stats_path="/data1/wcz/WLA/configs/norm_stats.json",
+                                norm_stats_path=str(make_norm_stats(tmp_path)),
                                 unnorm_key="libero_all")
     model_args = SimpleNamespace(chunk_size=8, sample_num=1, use_history_obs=True,
                                  history_obs_step=8, action_condition_type="no_action_condition",

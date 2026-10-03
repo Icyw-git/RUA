@@ -73,6 +73,10 @@ CPFS 若报告0可用空间，只有实际配额已核实足够时才加
 
 测试和本机共享依赖时可显式设置 `RUA_VENV_PYTHON`、`RUA_OSMESA_LIB_DIR`、
 `RUA_RUNTIME`，见 `configs/backend.env.example`。这种烟测不等于新机器全新安装验证。
+如果 `rua/` 位于独立仓库，运行需要 WLA 的入口前设置 `WLA_ROOT` 为完整的
+WLA checkout 路径；默认值仍是 `rua/` 的上级目录。Codex CLI 试跑默认从
+`PATH` 查找 `codex`，也可设置 `RUA_CODEX_BINARY` 为可执行文件路径；
+Show-Harness Codex 客户端还支持配置项 `codex_binary`，优先于环境变量。
 
 ## 3. Opus API、真实标定与交接许可
 

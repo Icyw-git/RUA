@@ -23,6 +23,7 @@ from PIL import Image
 
 from .budget import Budget, BudgetExhausted
 from .claude import parse_json
+from .codex_executable import resolve_codex_binary
 from .environment import LiberoSession
 from .handoff import NativeChunkExecutor
 from .paths import CODE, ROOT, execution_lock, save_json
@@ -30,7 +31,6 @@ from .service_wla_client import ServiceWLAClient
 
 
 MODEL = "gpt-6-astra"
-CODEX = Path("/home/wcz/.local/bin/codex")
 DECISION_SCHEMA = {
     "type": "object",
     "properties": {
@@ -43,7 +43,7 @@ DECISION_SCHEMA = {
 
 
 def ask_codex(directory: Path, budget: Budget, instruction: str, observation: dict,
-              decision_index: int) -> tuple[dict, dict]:
+              decision_index: int, codex_binary: Path) -> tuple[dict, dict]:
     budget.before_request()
     call_id = budget.requests
     request_dir = directory / "requests" / f"request-{call_id:03d}"
@@ -78,7 +78,7 @@ def ask_codex(directory: Path, budget: Budget, instruction: str, observation: di
         if remaining <= 0:
             raise BudgetExhausted("wall_clock_budget")
         completed = subprocess.run(
-            [str(CODEX), "exec", "--ephemeral", "--ignore-user-config",
+            [str(codex_binary), "exec", "--ephemeral", "--ignore-user-config",
              "--skip-git-repo-check", "--sandbox", "read-only", "--model", MODEL,
              "--cd", str(request_dir), "--image", str(request_dir / "front.png"),
              str(request_dir / "wrist.png"), "--output-last-message", str(response_path),
@@ -103,8 +103,7 @@ def ask_codex(directory: Path, budget: Budget, instruction: str, observation: di
 def run(port: int) -> tuple[Path, dict]:
     if os.environ.get("MUJOCO_GL") != "osmesa" or os.environ.get("CUDA_VISIBLE_DEVICES") != "":
         raise RuntimeError("Use the CPU OSMesa launcher with CUDA hidden from the parent")
-    if not CODEX.is_file():
-        raise FileNotFoundError(CODEX)
+    codex_binary = resolve_codex_binary()
     pilot = json.loads((CODE / "configs/pilot.json").read_text())
     cfg = json.loads((CODE / "configs/show_harness_libero.json").read_text())
     cfg.update(backend="codex", model=MODEL)
@@ -156,7 +155,8 @@ def run(port: int) -> tuple[Path, dict]:
             budget.check_time()
             index = len(decisions)
             observation = session.get_observation()
-            decision, record = ask_codex(directory, budget, instruction, observation, index)
+            decision, record = ask_codex(directory, budget, instruction, observation,
+                                         index, codex_binary)
             records.append(record)
             for camera in ("agentview", "wrist"):
                 Image.fromarray(observation[camera]).save(

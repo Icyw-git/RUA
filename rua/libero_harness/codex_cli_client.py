@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import subprocess
 import time
 from pathlib import Path
@@ -13,6 +12,7 @@ from PIL import Image
 
 from core.vlm.vlm_client import VLMResponse
 from .claude import ModelResponseError, parse_json
+from .codex_executable import resolve_codex_binary
 from .paths import save_json
 
 
@@ -26,9 +26,7 @@ class CodexCLIClient:
         self.budget = budget
         self.trace_dir = Path(trace_dir)
         self.trace_dir.mkdir(parents=True)
-        self.binary = cfg.get("codex_binary", "/home/wcz/.local/bin/codex")
-        if not Path(self.binary).is_file():
-            raise FileNotFoundError(self.binary)
+        self.binary = str(resolve_codex_binary(cfg.get("codex_binary")))
         self.records = []
 
     def _request(self, prompt, agentview_image, wrist_image=None, *, schema=None):
