@@ -4,6 +4,8 @@
 
 新数据统一使用下面的质量流程。下文基础导出和人工复核仅用于格式检查或已有审核任务，无需再串联运行。
 
+下文 `/path/to/...` 均为占位路径，运行前替换为实际目录；`/path/to/RUA/rua` 指本仓库或独立克隆中的 `rua/`，`/path/to/artifacts` 指原始 episode 的存放目录。
+
 已有 episode 保存后，可在独立仿真环境里一次完成回放、分类、导出。离线脚本只依赖 `rua/` 代码，可以从本仓库或独立克隆的 `nanorua/rua` 运行。先配置仿真 Python；若 LIBERO 没安装在该环境中，再将 `LIBERO_PYTHONPATH` 指向包含 `libero/` Python 包的目录。使用 LIBERO-PRO 时，还应将 `LIBERO_CONFIG_PATH` 指向对应配置目录。`RUA_ROOT` 默认是仓库目录的父目录，可按需要设置。输入可以是一个 episode，也可以是包含多个 episode 的目录；输出目录需为空：
 
 ```bash
@@ -45,25 +47,25 @@ RUA 运行时自动保存 `result.json`、`environment-steps.jsonl`、`front-con
 ## 基础导出（兼容入口）
 
 ```bash
-cd /data1/wcz/WLA
-PYTHONPATH=/data1/wcz/WLA/rua/scripts:/data1/wcz/WLA/rua/vendor/show_harness:/data1/wcz/WLA/rua \
-  /data1/wcz/conda-envs/rua-data/bin/python -m data_dump.training_dump \
-  /data1/wcz/WLA/rua/artifacts/YOUR_RUN \
-  --output-root /data1/wcz/rua-dumps/dump-001
+cd /path/to/RUA
+PYTHONPATH=/path/to/RUA/rua/scripts:/path/to/RUA/rua/vendor/show_harness:/path/to/RUA/rua \
+  /path/to/rua-data/bin/python -m data_dump.training_dump \
+  /path/to/artifacts/YOUR_RUN \
+  --output-root /path/to/rua-dumps/dump-001
 ```
 
-输入可以是单个 episode 目录或其上级运行目录，也可以传多个目录。输出目录须为空或尚不存在。`rua-data` 是 `/data1/wcz` 下单独的 Conda 环境；导出不会改共享服务或别人的 Python 环境。
+输入可以是单个 episode 目录或其上级运行目录，也可以传多个目录。输出目录须为空或尚不存在。`rua-data` 是单独的 Conda 环境；导出不会改共享服务或别人的 Python 环境。
 
 ## 人工复核（兼容入口）
 
 先对原始运行目录生成待复核建议：
 
 ```bash
-cd /data1/wcz/WLA/rua
-PYTHONPATH=/data1/wcz/WLA/rua/scripts:/data1/wcz/WLA/rua/vendor/show_harness:/data1/wcz/WLA/rua \
-  /data1/wcz/conda-envs/rua-data/bin/python -m data_dump.quality_screen \
-  /data1/wcz/WLA/rua/artifacts/YOUR_RUN \
-  --output /data1/wcz/rua-dumps/quality-proposals.jsonl
+cd /path/to/RUA/rua
+PYTHONPATH=/path/to/RUA/rua/scripts:/path/to/RUA/rua/vendor/show_harness:/path/to/RUA/rua \
+  /path/to/rua-data/bin/python -m data_dump.quality_screen \
+  /path/to/artifacts/YOUR_RUN \
+  --output /path/to/rua-dumps/quality-proposals.jsonl
 ```
 
 每个来源 episode 在 `quality-proposals.jsonl` 占一行。重要字段如下：
@@ -95,12 +97,12 @@ PYTHONPATH=/data1/wcz/WLA/rua/scripts:/data1/wcz/WLA/rua/vendor/show_harness:/da
 把建议、动作前后的前视/腕视关键帧和可选的逐步仿真结果放到一个审核目录：
 
 ```bash
-cd /data1/wcz/WLA/rua
-PYTHONPATH=/data1/wcz/WLA/rua/scripts:/data1/wcz/WLA/rua/vendor/show_harness:/data1/wcz/WLA/rua \
-  /data1/wcz/conda-envs/rua-data/bin/python -m data_dump.review_packet build \
-  /data1/wcz/rua-dumps/quality-proposals.jsonl \
-  --output /data1/wcz/rua-dumps/review-packet \
-  --oracle-root /data1/wcz/rua-dumps/YOUR_ORACLE
+cd /path/to/RUA/rua
+PYTHONPATH=/path/to/RUA/rua/scripts:/path/to/RUA/rua/vendor/show_harness:/path/to/RUA/rua \
+  /path/to/rua-data/bin/python -m data_dump.review_packet build \
+  /path/to/rua-dumps/quality-proposals.jsonl \
+  --output /path/to/rua-dumps/review-packet \
+  --oracle-root /path/to/rua-dumps/YOUR_ORACLE
 ```
 
 `review-packet/index.html` 可直接打开。每张卡片并排显示同一动作前后的前视与腕视，共四张图；目标条件对应动作后。每条轨迹还提供完整前视、腕视视频入口。页面可给整条轨迹选“保留整条、保留区间、不纳入、仅验证”，也可给夹爪线索和关键帧分别标“正常、纠正、错误、看不清”；点击“下载审核决定”得到 `review-decisions.jsonl`。选区间前仍要查看完整视频和 trace，首、中、末三个常规动作不足以判断整个连续片段。`review-queue.jsonl` 存动作前后帧路径、对应的原始视频帧号、完整视频路径与反馈；`review-decisions.template.jsonl` 是空白决定模板。Pro 评测样本默认选“仅验证”。
@@ -108,11 +110,11 @@ PYTHONPATH=/data1/wcz/WLA/rua/scripts:/data1/wcz/WLA/rua/vendor/show_harness:/da
 人工审核后，再生成导出器使用的文件：
 
 ```bash
-PYTHONPATH=/data1/wcz/WLA/rua/scripts:/data1/wcz/WLA/rua/vendor/show_harness:/data1/wcz/WLA/rua \
-  /data1/wcz/conda-envs/rua-data/bin/python -m data_dump.review_packet finalize \
-  /data1/wcz/rua-dumps/quality-proposals.jsonl \
-  /data1/wcz/rua-dumps/review-decisions.jsonl \
-  --output /data1/wcz/rua-dumps/review.jsonl
+PYTHONPATH=/path/to/RUA/rua/scripts:/path/to/RUA/rua/vendor/show_harness:/path/to/RUA/rua \
+  /path/to/rua-data/bin/python -m data_dump.review_packet finalize \
+  /path/to/rua-dumps/quality-proposals.jsonl \
+  /path/to/rua-dumps/review-decisions.jsonl \
+  --output /path/to/rua-dumps/review.jsonl
 ```
 
 `review.jsonl` 只有来源、是否批准、可选连续区间和理由，可传给下面的 WLA 导出器；`review-labels.jsonl` 单独保留动作判断，供以后研究 Agent 数据。生成器会拒绝把 `scope=libero_pro_single_smoke` 的轨迹批准给 WLA。只用模板生成的“仅验证”决定不等于有人逐步审核过，不能当人工质量标签。
@@ -120,11 +122,11 @@ PYTHONPATH=/data1/wcz/WLA/rua/scripts:/data1/wcz/WLA/rua/vendor/show_harness:/da
 若要人工筛选，准备 JSONL 文件，每行指定一个原始 episode 的绝对路径和审核决定：
 
 ```json
-{"source":"/data1/wcz/WLA/rua/artifacts/YOUR_RUN/task-00-init-00","approved_for_wla":true,"task_step_ranges":[[10,30],[42,60]],"reason":"仅保留复核过的连续动作段"}
-{"source":"/data1/wcz/WLA/rua/artifacts/YOUR_RUN/task-00-init-01","approved_for_wla":false,"reason":"抓错物体"}
+{"source":"/path/to/artifacts/YOUR_RUN/task-00-init-00","approved_for_wla":true,"task_step_ranges":[[10,30],[42,60]],"reason":"仅保留复核过的连续动作段"}
+{"source":"/path/to/artifacts/YOUR_RUN/task-00-init-01","approved_for_wla":false,"reason":"抓错物体"}
 ```
 
-再加 `--review /data1/wcz/my-review.jsonl`。传入 review 后，未列出的 episode 也不会进入 WLA 数据集。`approved_for_wla: true` 且不写 `task_step_ranges` 表示保留整条任务轨迹；写了范围则只保留这些片段。范围是任务动作编号 `[起点, 终点)`，从 0 开始，包含起点、不包含终点，不计初始化动作；例如 `[10,30]` 包含编号 10 至 29 的 20 帧，能产生 `20 - 8 = 12` 个 WLA 训练起点。每段至少 9 帧，按先后顺序填写，不能重叠；每段在 LeRobot 中成为独立 episode，避免跨过被剔除的动作拼接训练样本。`reason` 是可选的人工说明。规范化后的决定写入输出的 `review.jsonl`；被否决或被剪掉的动作仍留在原始运行目录和完整的 trace / feedback 中。不传 review 时，以自动审计和成功条件筛选整条轨迹。
+再加 `--review /path/to/my-review.jsonl`。传入 review 后，未列出的 episode 也不会进入 WLA 数据集。`approved_for_wla: true` 且不写 `task_step_ranges` 表示保留整条任务轨迹；写了范围则只保留这些片段。范围是任务动作编号 `[起点, 终点)`，从 0 开始，包含起点、不包含终点，不计初始化动作；例如 `[10,30]` 包含编号 10 至 29 的 20 帧，能产生 `20 - 8 = 12` 个 WLA 训练起点。每段至少 9 帧，按先后顺序填写，不能重叠；每段在 LeRobot 中成为独立 episode，避免跨过被剔除的动作拼接训练样本。`reason` 是可选的人工说明。规范化后的决定写入输出的 `review.jsonl`；被否决或被剪掉的动作仍留在原始运行目录和完整的 trace / feedback 中。不传 review 时，以自动审计和成功条件筛选整条轨迹。
 
 `task_step_ranges` 是人工复核结果，不会由“走了多少步”或“耗时多久”自动判好坏。成功轨迹中的试错、慢速完成、纠正动作可能有价值；导出器保留它们，除非审核者明确缩小范围。片段开头不足 8 帧的历史图沿用 WLA 加载器的首帧补齐规则。
 
@@ -170,7 +172,7 @@ LeRobot 可能随 episode 数增加而产生更多 chunk/file；实际文件名�
 `rejection_code` 可能是 `legacy_source`、`audit_failed`、`task_not_successful`、`uncertain_execution`、`training_data_invalid`、`review_rejected`、`invalid_review_range` 或 `camera_incompatible`。它们分别对应旧格式、账目审计失败、任务未成功、动作或清理状态不确定、训练帧不完整、人工否决、片段范围无效和相机格式不一致。
 
 ```json
-{"source":"/data1/wcz/WLA/rua/artifacts/YOUR_RUN/task-00-init-00","status":"completed","official_success":true,"task_steps":75,"elapsed_seconds":420.5,"control_tokens":["MV_UP","GRASP"],"audit_pass":true,"review_approved":true,"wla_candidate":true,"wla_training_starts":57,"rejection_code":null,"rejection_reason":null}
+{"source":"/path/to/artifacts/YOUR_RUN/task-00-init-00","status":"completed","official_success":true,"task_steps":75,"elapsed_seconds":420.5,"control_tokens":["MV_UP","GRASP"],"audit_pass":true,"review_approved":true,"wla_candidate":true,"wla_training_starts":57,"rejection_code":null,"rejection_reason":null}
 ```
 
 `trace.jsonl` 中每行有 `source` 和 `kind`：
